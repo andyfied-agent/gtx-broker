@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [tool.setuptools]
-packages = ["gtx_broker"]
+packages = ["gtx_broker", "second_shift"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
