@@ -4,6 +4,7 @@ Provides deterministic routing for the gtx-broker-direct-escalation workflow.
 Main entry point is GtxBrokerDirector from controller.py.
 """
 
+from .version import __version__
 from .state import (
     ProviderStatus,
     GTXBrokerWorkflow,
@@ -31,9 +32,20 @@ from .controller import (
     RoutingResponse,
     GtxBrokerDirector,
 )
+from .api import (
+    BacklogExecutionAdapter,
+    ExecutionOutcome,
+    ExecutionRequest,
+    VerificationResult,
+    WorkerResult,
+    BacklogRunner,
+    DispatchOutcome,
+    ItemLifecycle,
+    RunnerConfig,
+)
 
 __all__ = [
-    # State
+    "__version__",
     "ProviderStatus",
     "GTXBrokerWorkflow",
     "TaskClassification",
@@ -41,22 +53,25 @@ __all__ = [
     "ProviderTransition",
     "GTXBrokerState",
     "GTXBrokerRegistry",
-
-    # Classifier
     "GtxModelConfig",
     "GtxModelProfile",
     "GtxTaskClassifier",
-
-    # Escalation Policy
     "FailureClassification",
     "RoutingDecision",
     "FailureEvidence",
     "EscalationResult",
     "GtxEscalationPolicy",
-
-    # Controller
     "BrokerStatus",
     "RoutingRequest",
     "RoutingResponse",
     "GtxBrokerDirector",
+    "BacklogExecutionAdapter",
+    "ExecutionOutcome",
+    "ExecutionRequest",
+    "VerificationResult",
+    "WorkerResult",
+    "BacklogRunner",
+    "DispatchOutcome",
+    "ItemLifecycle",
+    "RunnerConfig",
 ]
