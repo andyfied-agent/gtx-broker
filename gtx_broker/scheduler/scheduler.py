@@ -223,6 +223,15 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
 
+            # Get current state before update
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return None
+            
+            from_state = row["state"]
+
             # Atomically claim the specific task (not first available)
             cursor.execute("""
             UPDATE tasks SET state = 'claimed', updated_at = ?
@@ -237,6 +246,10 @@ class Scheduler:
             cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             conn.commit()
+            
+            # Emit task_claimed event
+            self._emit_event(task_id, "task_claimed", from_state="queued", to_state="claimed")
+            
             conn.close()
 
             return self._row_to_dict(row) if row else None
@@ -485,10 +498,15 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            # Check task is running or failed
+            # Verify task is running or in awaiting_review (legal retry states)
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
+                conn.close()
+                return False
+            
+            # Only running and awaiting_review can transition to retry_wait
+            if row["state"] not in ("running", "awaiting_review"):
                 conn.close()
                 return False
                 
@@ -523,10 +541,16 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            # Only cancel queued, claimed, or retry_wait tasks
+            # Only cancel queued, claimed, retry_wait, or awaiting_review tasks
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
-            if not row or row["state"] in ("succeeded", "failed_terminal"):
+            if not row:
+                conn.close()
+                return False
+            
+            # Only queued, claimed, retry_wait, awaiting_review can be cancelled
+            # Not running, succeeded, failed_terminal
+            if row["state"] not in ("queued", "claimed", "retry_wait", "awaiting_review"):
                 conn.close()
                 return False
                 
@@ -539,6 +563,168 @@ class Scheduler:
             if cursor.rowcount > 0:
                 self._emit_event(task_id, "task_cancelled",
                                from_state=row["state"], to_state=to_state)
+                conn.commit()
+                
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError:
+            return False
+
+    def requeue_retry_wait(self, task_id: str) -> bool:
+        """Transition retry_wait → queued.
+        
+        Args:
+            task_id: Task ID to requeue
+            
+        Returns:
+            True if requeued
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False
+            
+            if row["state"] != "retry_wait":
+                conn.close()
+                return False
+            
+            to_state = "queued"
+            cursor.execute("""
+                UPDATE tasks SET state = ?, updated_at = ?
+                WHERE id = ?
+            """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
+            
+            if cursor.rowcount > 0:
+                self._emit_event(task_id, "task_requeued",
+                               from_state="retry_wait", to_state=to_state)
+                conn.commit()
+                
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError:
+            return False
+
+    def requeue_awaiting_review(self, task_id: str) -> bool:
+        """Transition awaiting_review → queued.
+        
+        Args:
+            task_id: Task ID to requeue
+            
+        Returns:
+            True if requeued
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False
+            
+            if row["state"] != "awaiting_review":
+                conn.close()
+                return False
+            
+            to_state = "queued"
+            cursor.execute("""
+                UPDATE tasks SET state = ?, updated_at = ?
+                WHERE id = ?
+            """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
+            
+            if cursor.rowcount > 0:
+                self._emit_event(task_id, "task_requeued",
+                               from_state="awaiting_review", to_state=to_state)
+                conn.commit()
+                
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError:
+            return False
+
+    def transition_awaiting_review_to_failed(self, task_id: str, error: Optional[str] = None) -> bool:
+        """Transition awaiting_review → failed_terminal.
+        
+        Args:
+            task_id: Task ID
+            error: Optional error message
+            
+        Returns:
+            True if transitioned
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False
+            
+            if row["state"] != "awaiting_review":
+                conn.close()
+                return False
+            
+            to_state = "failed_terminal"
+            cursor.execute("""
+                UPDATE tasks SET state = ?, error = ?, updated_at = ?
+                WHERE id = ?
+            """, (to_state, error, datetime.now(timezone.utc).isoformat(), task_id))
+            
+            if cursor.rowcount > 0:
+                self._emit_event(task_id, "task_completed",
+                               from_state="awaiting_review", to_state=to_state,
+                               details=f"result=failure")
+                conn.commit()
+                
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError:
+            return False
+
+    def transition_running_to_awaiting_review(self, task_id: str) -> bool:
+        """Transition running → awaiting_review.
+        
+        Args:
+            task_id: Task ID
+            
+        Returns:
+            True if transitioned
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False
+            
+            if row["state"] != "running":
+                conn.close()
+                return False
+            
+            to_state = "awaiting_review"
+            cursor.execute("""
+                UPDATE tasks SET state = ?, updated_at = ?
+                WHERE id = ?
+            """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
+            
+            if cursor.rowcount > 0:
+                self._emit_event(task_id, "task_started",
+                               from_state="running", to_state=to_state)
                 conn.commit()
                 
             conn.close()

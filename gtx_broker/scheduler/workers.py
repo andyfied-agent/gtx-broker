@@ -231,7 +231,16 @@ class WorkerRegistry:
         columns = ["profile", "endpoint", "capability", "availability",
                    "exclusive_resource", "max_concurrent", "context_limit",
                    "model_profile", "created_at", "updated_at"]
-        return [WorkerProfile.from_dict(dict(zip(columns, row))) for row in rows]
+        
+        # Map 'availability' column to 'status' key for all workers
+        result = []
+        for row in rows:
+            data = dict(zip(columns, row))
+            # Map 'availability' to 'status' for WorkerProfile.from_dict
+            data["status"] = data["availability"]
+            del data["availability"]
+            result.append(WorkerProfile.from_dict(data))
+        return result
 
     def update_status(self, profile: str, status: WorkerStatus) -> bool:
         """Update worker status.

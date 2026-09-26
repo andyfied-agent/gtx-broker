@@ -10,7 +10,7 @@ Implements the storage contract from Vision Scheduler Architecture:
 
 from pathlib import Path
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -108,7 +108,7 @@ class StorageContract:
             "mime_type": mime,
             "file_size": file_size,
             "content_hash": content_hash,
-            "validated_at": datetime.utcnow().isoformat(),
+            "validated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         return True, "", metadata
@@ -132,7 +132,7 @@ class StorageContract:
 
         # Generate from timestamp + random
         import uuid
-        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         unique = uuid.uuid4().hex[:8]
         return f"task-{timestamp}-{unique}"
 
@@ -179,57 +179,45 @@ class StorageContract:
             idempotency_key=idempotency_key,
         )
 
-        # Create task directory
+        # Atomic staging: assemble complete task under tmp, then rename to incoming
+        temp_task_dir = self.tmp_path / f"{task_id}.tmp"
+        temp_task_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy input file to temp task directory
+        target_file = temp_task_dir / f"image.{metadata['extension']}"
+        import shutil
+        shutil.copy2(str(source_path), str(target_file))
+
+        # Create metadata.json in temp directory
+        metadata_task = {
+            "task_id": task_id,
+            "source_chat": source_chat,
+            "source_message_id": source_message_id,
+            "idempotency_key": idempotency_key,
+            "content_hash": metadata["content_hash"],
+            "mime_type": metadata["mime_type"],
+            "file_size": metadata["file_size"],
+            "status": "accepted",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        metadata_file = temp_task_dir / "metadata.json"
+        with open(metadata_file, "w") as f:
+            json.dump(metadata_task, f, indent=2)
+
+        # Atomic move: rename temp directory to final location in incoming
         task_dir = self.incoming_path / task_id
-        task_dir.mkdir(parents=True, exist_ok=True)
-
-        # Stage file atomically (write to tmp first, then move)
-        temp_file = self.tmp_path / f"{task_id}.tmp"
-        target_file = task_dir / f"image.{metadata['extension']}"
-
         try:
-            # Copy to temp location
-            import shutil
-            shutil.copy2(str(source_path), str(temp_file))
-
-            # Atomic move to final location
-            os.rename(str(temp_file), str(target_file))
-
-            # Create metadata.json
-            metadata_task = {
-                "task_id": task_id,
-                "source_chat": source_chat,
-                "source_message_id": source_message_id,
-                "idempotency_key": idempotency_key,
-                "content_hash": metadata["content_hash"],
-                "mime_type": metadata["mime_type"],
-                "file_size": metadata["file_size"],
-                "status": "accepted",
-                "created_at": datetime.utcnow().isoformat(),
-                "updated_at": datetime.utcnow().isoformat(),
-            }
-
-            metadata_file = task_dir / "metadata.json"
-            temp_metadata = self.tmp_path / f"{task_id}.meta.json"
-
-            with open(temp_metadata, "w") as f:
-                json.dump(metadata_task, f, indent=2)
-
-            os.rename(str(temp_metadata), str(metadata_file))
-
-            return task_id, metadata_task
-
+            os.rename(str(temp_task_dir), str(task_dir))
         except Exception as e:
-            # Clean up on failure
-            if temp_file.exists():
-                temp_file.unlink()
-            if target_file.exists():
-                target_file.unlink()
-            if temp_metadata.exists():
-                temp_metadata.unlink()
-            if task_dir.exists() and not task_dir.iterdir():
-                task_dir.rmdir()
-            raise ValueError(f"Staging failed: {e}")
+            # Clean up temp directory on failure
+            if temp_task_dir.exists():
+                import shutil
+                shutil.rmtree(str(temp_task_dir))
+            raise ValueError(f"Atomic staging failed: {e}")
+
+        return task_id, metadata_task
 
     def claim_for_processing(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Atomically claim a task from incoming to processing.
@@ -261,7 +249,7 @@ class StorageContract:
 
             # Update metadata
             metadata["status"] = "processing"
-            metadata["claimed_at"] = datetime.utcnow().isoformat()
+            metadata["claimed_at"] = datetime.now(timezone.utc).isoformat()
             metadata_file = processing_task_dir / "metadata.json"
 
             with open(metadata_file, "w") as f:
@@ -308,7 +296,7 @@ class StorageContract:
 
             # Update metadata
             metadata["status"] = "processed"
-            metadata["completed_at"] = datetime.utcnow().isoformat()
+            metadata["completed_at"] = datetime.now(timezone.utc).isoformat()
             if result:
                 metadata["result"] = result
             metadata_file = processed_task_dir / "metadata.json"
@@ -349,7 +337,7 @@ class StorageContract:
             Number of tasks removed
         """
         from datetime import timedelta
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         removed = 0
 
         for base_dir in [self.processed_path]:  # Only clean processed
