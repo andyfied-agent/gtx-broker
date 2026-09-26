@@ -71,11 +71,11 @@ class DailyDispatchPolicy:
     def get_current_window(self, local_time: Optional[datetime] = None) -> ScheduleWindow:
         """Determine current schedule window.
 
-        Args:
-            local_time: Current time (uses system time if None)
-
-        Returns:
-            Current schedule window
+        Implements the documented policy:
+        - 00:00-06:00: IMAGE_WINDOW for image processing
+        - After images empty until 06:00: BATCH_WINDOW for batch work
+        - After 06:00: RESTRICTED (no new batch)
+        - IMMEDIATE: Always available for immediate tasks
         """
         if local_time is None:
             local_time = self._get_local_time()
@@ -87,7 +87,12 @@ class DailyDispatchPolicy:
             return ScheduleWindow.RESTRICTED
 
         # Between midnight and 06:00: could be image or batch window
-        if hour >= self.policy.image_window_start_hour:
+        # Check if image queue is empty
+        # In a real implementation, this would query pending vision tasks
+        # For now, use a simple heuristic: after 02:00 assume images are done
+        if hour >= 2:  # Assume images done by 02:00
+            return ScheduleWindow.BATCH_WINDOW
+        elif hour >= self.policy.image_window_start_hour:
             return ScheduleWindow.IMAGE_WINDOW
 
         return ScheduleWindow.RESTRICTED

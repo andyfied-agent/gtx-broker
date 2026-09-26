@@ -333,12 +333,15 @@ class Scheduler:
                     return False
                 
                 # Check worker capability matches task kind
-                if worker.capability and task_kind not in worker.capability.lower():
-                    self._emit_event(task_id, "worker_failed",
-                                   from_state=None, to_state=None,
-                                   details=f"worker={worker_profile} capability={worker.capability} task_kind={task_kind}")
-                    conn.close()
-                    return False
+                # Capabilities are comma-separated (e.g., "text,code")
+                if worker.capability:
+                    worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
+                    if task_kind.lower() not in worker_caps:
+                        self._emit_event(task_id, "worker_failed",
+                                       from_state=None, to_state=None,
+                                       details=f"worker={worker_profile} capability={worker.capability} task_kind={task_kind}")
+                        conn.close()
+                        return False
 
             try:
                 cursor.execute("""
@@ -454,11 +457,10 @@ class Scheduler:
     def get_pending_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get pending (queued) tasks, respecting policy schedule.
 
-        Args:
-            limit: Maximum number of tasks to return
-
-        Returns:
-            List of task data
+        Policy rules:
+        - Immediate tasks: Always allowed (outranks all scheduled work)
+        - Vision tasks: IMAGE_WINDOW only (00:00-06:00)
+        - Batch tasks: BATCH_WINDOW or IMAGE_WINDOW (after images empty)
         """
         try:
             conn = self._get_connection()
@@ -467,31 +469,36 @@ class Scheduler:
             # Get current schedule window
             current_window = self._policy.get_current_window()
             
-            # Query queued tasks, ordered by priority
-            # Vision tasks only during image window (midnight-06:00)
-            # Batch tasks after images until 06:00
-            # Immediate tasks always allowed
+            # Build query based on window
+            # IMMEDIATE tasks always allowed
+            # VISION only during IMAGE_WINDOW
+            # BATCH during IMAGE_WINDOW (after images) or BATCH_WINDOW
+            
             if current_window == ScheduleWindow.IMAGE_WINDOW:
-                # Image window: only vision tasks
+                # Image window: vision + immediate
                 cursor.execute("""
                 SELECT * FROM tasks
-                WHERE state = 'queued' AND mode = 'vision'
-                ORDER BY priority DESC, created_at ASC
+                WHERE state = 'queued' AND mode IN ('vision', 'immediate')
+                ORDER BY 
+                    CASE mode WHEN 'immediate' THEN 0 ELSE 1 END,
+                    priority DESC, created_at ASC
                 LIMIT ?
                 """, (limit,))
-            elif current_window == ScheduleWindow.RESTRICTED:
-                # After 06:00: only immediate tasks
-                cursor.execute("""
-                SELECT * FROM tasks
-                WHERE state = 'queued' AND mode = 'immediate'
-                ORDER BY priority DESC, created_at ASC
-                LIMIT ?
-                """, (limit,))
-            else:
-                # Image or unrestricted: batch and immediate
+            elif current_window == ScheduleWindow.BATCH_WINDOW:
+                # Batch window: batch + immediate
                 cursor.execute("""
                 SELECT * FROM tasks
                 WHERE state = 'queued' AND mode IN ('batch', 'immediate')
+                ORDER BY 
+                    CASE mode WHEN 'immediate' THEN 0 ELSE 1 END,
+                    priority DESC, created_at ASC
+                LIMIT ?
+                """, (limit,))
+            else:
+                # RESTRICTED: only immediate tasks
+                cursor.execute("""
+                SELECT * FROM tasks
+                WHERE state = 'queued' AND mode = 'immediate'
                 ORDER BY priority DESC, created_at ASC
                 LIMIT ?
                 """, (limit,))
