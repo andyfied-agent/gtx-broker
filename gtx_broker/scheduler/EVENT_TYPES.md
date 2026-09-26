@@ -13,7 +13,7 @@ The scheduler logs all state transitions to the `task_events` table. Each event 
 
 ### Task Lifecycle Events
 
-|| Event Type | Description | When Generated |
+| Event Type | Description | When Generated |
 |------------|-------------|----------------|
 | `task_added` | New task admitted to queue | `add_task()` succeeds |
 | `task_claimed` | Task reserved for processing | `claim_task()` succeeds |
@@ -22,20 +22,12 @@ The scheduler logs all state transitions to the `task_events` table. Each event 
 | `task_completed` | Task finished successfully/failed | `complete_task()` called |
 | `task_cancelled` | Task cancelled by operator | `cancel_task()` succeeds |
 
-### Worker Assignment Events
-
-| Event Type | Description | When Generated |
-|------------|-------------|----------------|
-| `worker_selected` | Worker chosen for task | Before `start_task()` |
-| `worker_failed` | Worker execution failed | In `complete_task()` with failure_class |
-
 ### Retry/Recovery Events
 
 | Event Type | Description | When Generated |
 |------------|-------------|----------------|
 | `retry_scheduled` | Task queued for retry | `retry_wait` state transition |
 | `task_requeued` | Task returned to queue | `awaiting_review` → `queued` |
-| `attempt_limit_reached` | Max attempts exceeded | Auto-escalation |
 
 ## Event Details Format
 

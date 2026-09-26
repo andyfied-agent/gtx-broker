@@ -68,14 +68,22 @@ class DailyDispatchPolicy:
         from zoneinfo import ZoneInfo
         return datetime.now(ZoneInfo("Europe/London"))
 
-    def get_current_window(self, local_time: Optional[datetime] = None) -> ScheduleWindow:
+    def get_current_window(self, local_time: Optional[datetime] = None,
+                           pending_vision: int = 0) -> ScheduleWindow:
         """Determine current schedule window.
 
         Implements the documented policy:
-        - 00:00-06:00: IMAGE_WINDOW for image processing
+        - 00:00-06:00: IMAGE_WINDOW while images are pending
         - After images empty until 06:00: BATCH_WINDOW for batch work
         - After 06:00: RESTRICTED (no new batch)
         - IMMEDIATE: Always available for immediate tasks
+
+        Args:
+            local_time: Current time (uses system time if None)
+            pending_vision: Number of pending vision tasks (0 = queue empty)
+
+        Returns:
+            Current schedule window
         """
         if local_time is None:
             local_time = self._get_local_time()
@@ -86,11 +94,9 @@ class DailyDispatchPolicy:
         if hour >= self.policy.image_window_end_hour and hour < 24:
             return ScheduleWindow.RESTRICTED
 
-        # Between midnight and 06:00: could be image or batch window
-        # Check if image queue is empty
-        # In a real implementation, this would query pending vision tasks
-        # For now, use a simple heuristic: after 02:00 assume images are done
-        if hour >= 2:  # Assume images done by 02:00
+        # Between midnight and 06:00: image or batch window
+        # Switch to BATCH_WINDOW only when image queue is empty
+        if pending_vision == 0 and hour >= self.policy.image_window_start_hour:
             return ScheduleWindow.BATCH_WINDOW
         elif hour >= self.policy.image_window_start_hour:
             return ScheduleWindow.IMAGE_WINDOW

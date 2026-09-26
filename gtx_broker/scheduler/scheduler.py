@@ -334,9 +334,17 @@ class Scheduler:
                 
                 # Check worker capability matches task kind
                 # Capabilities are comma-separated (e.g., "text,code")
+                # Use partial matching: "code" matches "text,code", "coding" matches "text,code"
                 if worker.capability:
                     worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
-                    if task_kind.lower() not in worker_caps:
+                    # Check if task_kind matches any capability (partial match)
+                    # e.g., "coding" matches "code", "vision" matches "vision"
+                    matched = False
+                    for cap in worker_caps:
+                        if cap in task_kind.lower() or task_kind.lower() in cap:
+                            matched = True
+                            break
+                    if not matched:
                         self._emit_event(task_id, "worker_failed",
                                        from_state=None, to_state=None,
                                        details=f"worker={worker_profile} capability={worker.capability} task_kind={task_kind}")
@@ -466,8 +474,13 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
 
+            # Get pending vision task count for policy decision
+            cursor.execute("SELECT COUNT(*) FROM tasks WHERE state = 'queued' AND mode = 'vision'")
+            pending_vision = cursor.fetchone()[0]
+            conn.close()
+
             # Get current schedule window
-            current_window = self._policy.get_current_window()
+            current_window = self._policy.get_current_window(pending_vision=pending_vision)
             
             # Build query based on window
             # IMMEDIATE tasks always allowed
