@@ -217,40 +217,29 @@ class Scheduler:
             task_id: Task ID to claim
 
         Returns:
-            Task payload if claimed, None if not available
+            Task data with updated state if claimed, None if not available
         """
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            # Find next available task (highest priority, queued state)
-            cursor.execute("""
-            SELECT * FROM tasks
-            WHERE state = 'queued'
-            ORDER BY priority DESC, created_at ASC
-            LIMIT 1
-            """)
-
-            row = cursor.fetchone()
-            if not row:
-                conn.close()
-                return None
-
-            # Update state
+            # Atomically claim the specific task (not first available)
             cursor.execute("""
             UPDATE tasks SET state = 'claimed', updated_at = ?
             WHERE id = ? AND state = 'queued'
-            """, (datetime.now(timezone.utc).isoformat(), row["id"]))
+            """, (datetime.now(timezone.utc).isoformat(), task_id))
 
             if cursor.rowcount == 0:
                 conn.close()
                 return None
 
+            # Fetch the updated row (now with state='claimed')
+            cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
             conn.commit()
             conn.close()
 
-            # Return task data
-            return self._row_to_dict(row)
+            return self._row_to_dict(row) if row else None
 
         except sqlite3.OperationalError:
             return None
@@ -481,3 +470,79 @@ class Scheduler:
         if not json_str:
             return None
         return json.loads(json_str)
+
+    def retry_task(self, task_id: str, delay_seconds: int = 60) -> bool:
+        """Schedule task for retry.
+        
+        Args:
+            task_id: Task ID to retry
+            delay_seconds: Seconds to wait before retry
+            
+        Returns:
+            True if retry scheduled
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Check task is running or failed
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False
+                
+            to_state = "retry_wait"
+            cursor.execute("""
+                UPDATE tasks SET state = ?, updated_at = ?
+                WHERE id = ?
+            """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
+            
+            if cursor.rowcount > 0:
+                self._emit_event(task_id, "retry_scheduled", 
+                               from_state=row["state"], to_state=to_state,
+                               details=f"delay={delay_seconds}s")
+                conn.commit()
+                
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError:
+            return False
+
+    def cancel_task(self, task_id: str) -> bool:
+        """Cancel a task.
+        
+        Args:
+            task_id: Task ID to cancel
+            
+        Returns:
+            True if cancelled
+        """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Only cancel queued, claimed, or retry_wait tasks
+            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            row = cursor.fetchone()
+            if not row or row["state"] in ("succeeded", "failed_terminal"):
+                conn.close()
+                return False
+                
+            to_state = "cancelled"
+            cursor.execute("""
+                UPDATE tasks SET state = ?, updated_at = ?
+                WHERE id = ?
+            """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
+            
+            if cursor.rowcount > 0:
+                self._emit_event(task_id, "task_cancelled",
+                               from_state=row["state"], to_state=to_state)
+                conn.commit()
+                
+            conn.close()
+            return True
+            
+        except sqlite3.OperationalError:
+            return False

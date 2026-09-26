@@ -145,6 +145,48 @@ class WorkerRegistry:
         finally:
             conn.close()
 
+    def _insert_worker(self, worker: WorkerProfile) -> bool:
+        """Insert worker profile if not exists (preserves existing status).
+
+        This is used during initialization to avoid overwriting persisted status.
+
+        Args:
+            worker: Worker profile to insert
+
+        Returns:
+            True if inserted, False if already exists
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute("""
+            INSERT INTO workers (
+                profile, endpoint, capability, availability,
+                exclusive_resource, max_concurrent, context_limit,
+                model_profile, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(profile) DO NOTHING
+            """, (
+                worker.profile,
+                worker.endpoint,
+                worker.capability,
+                worker.status.value,
+                worker.exclusive_resource,
+                worker.max_concurrent,
+                worker.context_limit,
+                worker.model_profile,
+                worker.created_at,
+                worker.updated_at,
+            ))
+
+            inserted = cursor.rowcount > 0
+            conn.commit()
+            return inserted
+
+        finally:
+            conn.close()
+
     def get_worker(self, profile: str) -> Optional[WorkerProfile]:
         """Get worker profile by name.
 
@@ -168,6 +210,9 @@ class WorkerRegistry:
                    "exclusive_resource", "max_concurrent", "context_limit",
                    "model_profile", "created_at", "updated_at"]
         data = dict(zip(columns, row))
+        # Map 'availability' column to 'status' key for WorkerProfile.from_dict
+        data["status"] = data["availability"]
+        del data["availability"]
         return WorkerProfile.from_dict(data)
 
     def get_all_workers(self) -> List[WorkerProfile]:
@@ -284,4 +329,5 @@ def initialize_workers(db_path: Path):
     registry = WorkerRegistry(db_path)
 
     for worker in DEFAULT_WORKERS:
-        registry.register_worker(worker)
+        # Use INSERT only, not REPLACE, to preserve existing status
+        registry._insert_worker(worker)

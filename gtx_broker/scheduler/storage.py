@@ -295,15 +295,16 @@ class StorageContract:
             with open(metadata_file, "r") as f:
                 metadata = json.load(f)
 
-            # Move to processed
+            # Move to processed first
             import shutil
             processed_task_dir = self.processed_path / task_id
 
-            # If output_path provided, move it to processed
-            if output_path and output_path.exists():
-                shutil.copy2(str(output_path), str(processed_task_dir))
-
             shutil.move(str(processing_task_dir), str(processed_task_dir))
+
+            # If output_path provided, move it to processed directory
+            if output_path and output_path.exists():
+                output_dest = processed_task_dir / output_path.name
+                shutil.copy2(str(output_path), str(output_dest))
 
             # Update metadata
             metadata["status"] = "processed"

@@ -65,11 +65,8 @@ class DailyDispatchPolicy:
 
     def _get_local_time(self) -> datetime:
         """Return current time in compute01's timezone (Europe/London)."""
-        # TODO: Detect actual timezone from system or config
-        # For now, assume Europe/London
-        from datetime import timezone as tz
-        london_tz = tz(timedelta(hours=0))  # UTC (BST is UTC+1, handled separately)
-        return datetime.now(london_tz)
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Europe/London"))
 
     def get_current_window(self, local_time: Optional[datetime] = None) -> ScheduleWindow:
         """Determine current schedule window.
