@@ -4,7 +4,7 @@ Replaces JSON-based scheduler with SQLite implementation matching the
 scheduler architecture specification.
 """
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Callable, List, Dict, Any
 import sqlite3
 from pathlib import Path
@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from gtx_broker.scheduler.storage import StorageContract
 from gtx_broker.scheduler.workers import WorkerRegistry, WorkerStatus, initialize_workers
-from gtx_broker.scheduler.policies import DailyDispatchPolicy, TaskMode, get_dispatch_policy
+from gtx_broker.scheduler.policies import DailyDispatchPolicy, TaskMode, get_dispatch_policy, ScheduleWindow
 
 
 @dataclass
@@ -84,7 +84,7 @@ class Scheduler:
         conn = self._get_connection()
         cursor = conn.cursor()
 
-        # Create tasks table
+        # Create tasks table with retry_at column
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
@@ -98,6 +98,7 @@ class Scheduler:
             idempotency_key TEXT UNIQUE,
             deadline_timestamp TEXT,
             retry_policy TEXT,
+            retry_at TIMESTAMP,
             error TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -158,6 +159,11 @@ class Scheduler:
             # If event logging fails, don't break the main operation
             pass
 
+    def _validate_transition(self, task_id: str, from_state: str, to_state: str) -> bool:
+        """Validate that a state transition is allowed by STATE_TRANSITIONS table."""
+        allowed = self.STATE_TRANSITIONS.get(from_state, [])
+        return to_state in allowed
+
     def add_task(self, task_id: str, kind: str, payload: Dict[str, Any],
                  mode: str = "batch", priority: int = 0,
                  idempotency_key: Optional[str] = None) -> bool:
@@ -210,11 +216,12 @@ class Scheduler:
         except sqlite3.OperationalError:
             return False
 
-    def claim_task(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """Atomically claim a task for processing.
+    def claim_task(self, task_id: str, worker_profile: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Atomically claim a task for processing with worker selection.
 
         Args:
             task_id: Task ID to claim
+            worker_profile: Optional specific worker to use; if None, uses select_worker()
 
         Returns:
             Task data with updated state if claimed, None if not available
@@ -224,13 +231,22 @@ class Scheduler:
             cursor = conn.cursor()
 
             # Get current state before update
-            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return None
             
             from_state = row["state"]
+
+            # Validate transition is legal per STATE_TRANSITIONS
+            if from_state != "queued":
+                conn.close()
+                return None
+            
+            if not self._validate_transition(task_id, from_state, "claimed"):
+                conn.close()
+                return None
 
             # Atomically claim the specific task (not first available)
             cursor.execute("""
@@ -257,9 +273,27 @@ class Scheduler:
         except sqlite3.OperationalError:
             return None
 
+    def _close_current_attempt(self, task_id: str) -> bool:
+        """Close any open attempt for a task by setting end_at."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                UPDATE task_attempts SET end_at = ?
+                WHERE task_id = ? AND end_at IS NULL
+            """, (datetime.now(timezone.utc).isoformat(), task_id))
+            
+            closed = cursor.rowcount > 0
+            conn.commit()
+            conn.close()
+            return closed
+        except sqlite3.OperationalError:
+            return False
+
     def start_task(self, task_id: str, worker_profile: str,
                    model_profile: Optional[str] = None) -> bool:
-        """Mark a task as running.
+        """Mark a task as running, with worker capability validation.
 
         Args:
             task_id: Task ID
@@ -274,17 +308,46 @@ class Scheduler:
             cursor = conn.cursor()
 
             # Check task is claimed
-            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row or row["state"] != "claimed":
                 conn.close()
                 return False
+
+            # Check worker capability if worker_profile provided
+            if worker_profile:
+                # Get task kind from row
+                task_kind = row["kind"]
+                
+                worker = self._worker_registry.get_worker(worker_profile)
+                if not worker:
+                    conn.close()
+                    return False
+                
+                # Check worker is available
+                if worker.status != WorkerStatus.AVAILABLE:
+                    self._emit_event(task_id, "worker_failed",
+                                   from_state=None, to_state=None,
+                                   details=f"worker={worker_profile} status={worker.status.value}")
+                    conn.close()
+                    return False
+                
+                # Check worker capability matches task kind
+                if worker.capability and task_kind not in worker.capability.lower():
+                    self._emit_event(task_id, "worker_failed",
+                                   from_state=None, to_state=None,
+                                   details=f"worker={worker_profile} capability={worker.capability} task_kind={task_kind}")
+                    conn.close()
+                    return False
 
             try:
                 cursor.execute("""
                 UPDATE tasks SET state = 'running', updated_at = ?
                 WHERE id = ?
                 """, (datetime.now(timezone.utc).isoformat(), task_id))
+
+                # Close any previous open attempt before starting new one
+                self._close_current_attempt(task_id)
 
                 # Record attempt
                 cursor.execute("""
@@ -312,7 +375,7 @@ class Scheduler:
 
     def complete_task(self, task_id: str, result: Dict[str, Any] = None,
                       error: Optional[str] = None, failure_class: Optional[str] = None) -> bool:
-        """Mark a task as completed.
+        """Mark a task as completed, closing all open attempts.
 
         Args:
             task_id: Task ID
@@ -342,7 +405,7 @@ class Scheduler:
                 WHERE id = ?
                 """, (to_state, error, datetime.now(timezone.utc).isoformat(), task_id))
 
-                # Update attempt
+                # Close ALL open attempts (fixes the multiple-attempt bug)
                 cursor.execute("""
                 UPDATE task_attempts SET end_at = ?, result = ?, failure_class = ?
                 WHERE task_id = ? AND end_at IS NULL
@@ -389,7 +452,7 @@ class Scheduler:
             return None
 
     def get_pending_tasks(self, limit: int = 10) -> List[Dict[str, Any]]:
-        """Get pending (queued) tasks.
+        """Get pending (queued) tasks, respecting policy schedule.
 
         Args:
             limit: Maximum number of tasks to return
@@ -401,12 +464,37 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            cursor.execute("""
-            SELECT * FROM tasks
-            WHERE state = 'queued'
-            ORDER BY priority DESC, created_at ASC
-            LIMIT ?
-            """, (limit,))
+            # Get current schedule window
+            current_window = self._policy.get_current_window()
+            
+            # Query queued tasks, ordered by priority
+            # Vision tasks only during image window (midnight-06:00)
+            # Batch tasks after images until 06:00
+            # Immediate tasks always allowed
+            if current_window == ScheduleWindow.IMAGE_WINDOW:
+                # Image window: only vision tasks
+                cursor.execute("""
+                SELECT * FROM tasks
+                WHERE state = 'queued' AND mode = 'vision'
+                ORDER BY priority DESC, created_at ASC
+                LIMIT ?
+                """, (limit,))
+            elif current_window == ScheduleWindow.RESTRICTED:
+                # After 06:00: only immediate tasks
+                cursor.execute("""
+                SELECT * FROM tasks
+                WHERE state = 'queued' AND mode = 'immediate'
+                ORDER BY priority DESC, created_at ASC
+                LIMIT ?
+                """, (limit,))
+            else:
+                # Image or unrestricted: batch and immediate
+                cursor.execute("""
+                SELECT * FROM tasks
+                WHERE state = 'queued' AND mode IN ('batch', 'immediate')
+                ORDER BY priority DESC, created_at ASC
+                LIMIT ?
+                """, (limit,))
 
             rows = cursor.fetchall()
             conn.close()
@@ -485,12 +573,12 @@ class Scheduler:
         return json.loads(json_str)
 
     def retry_task(self, task_id: str, delay_seconds: int = 60) -> bool:
-        """Schedule task for retry.
-        
+        """Schedule task for retry with proper state enforcement and delay.
+
         Args:
             task_id: Task ID to retry
             delay_seconds: Seconds to wait before retry
-            
+
         Returns:
             True if retry scheduled
         """
@@ -498,28 +586,41 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            # Verify task is running or in awaiting_review (legal retry states)
+            # Verify task is in running state (only legal source per STATE_TRANSITIONS)
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
             
-            # Only running and awaiting_review can transition to retry_wait
-            if row["state"] not in ("running", "awaiting_review"):
+            from_state = row["state"]
+            
+            # Only running can transition to retry_wait per STATE_TRANSITIONS
+            if from_state != "running":
                 conn.close()
                 return False
-                
+            
+            # Validate transition is legal
+            if not self._validate_transition(task_id, from_state, "retry_wait"):
+                conn.close()
+                return False
+            
+            # Close the current open attempt before retry
+            self._close_current_attempt(task_id)
+            
+            # Calculate retry time
+            retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+            
             to_state = "retry_wait"
             cursor.execute("""
-                UPDATE tasks SET state = ?, updated_at = ?
+                UPDATE tasks SET state = ?, retry_at = ?, updated_at = ?
                 WHERE id = ?
-            """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
+            """, (to_state, retry_at.isoformat(), datetime.now(timezone.utc).isoformat(), task_id))
             
             if cursor.rowcount > 0:
                 self._emit_event(task_id, "retry_scheduled", 
-                               from_state=row["state"], to_state=to_state,
-                               details=f"delay={delay_seconds}s")
+                               from_state=from_state, to_state=to_state,
+                               details=f"delay={delay_seconds}s, retry_at={retry_at.isoformat()}")
                 conn.commit()
                 
             conn.close()
@@ -529,11 +630,11 @@ class Scheduler:
             return False
 
     def cancel_task(self, task_id: str) -> bool:
-        """Cancel a task.
-        
+        """Cancel a task, enforcing STATE_TRANSITIONS table.
+
         Args:
             task_id: Task ID to cancel
-            
+
         Returns:
             True if cancelled
         """
@@ -541,16 +642,18 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            # Only cancel queued, claimed, retry_wait, or awaiting_review tasks
+            # Get current state
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
             
-            # Only queued, claimed, retry_wait, awaiting_review can be cancelled
-            # Not running, succeeded, failed_terminal
-            if row["state"] not in ("queued", "claimed", "retry_wait", "awaiting_review"):
+            from_state = row["state"]
+            
+            # Validate transition is legal per STATE_TRANSITIONS
+            # Only queued and claimed can transition to cancelled
+            if not self._validate_transition(task_id, from_state, "cancelled"):
                 conn.close()
                 return False
                 
@@ -562,7 +665,7 @@ class Scheduler:
             
             if cursor.rowcount > 0:
                 self._emit_event(task_id, "task_cancelled",
-                               from_state=row["state"], to_state=to_state)
+                               from_state=from_state, to_state=to_state)
                 conn.commit()
                 
             conn.close()
@@ -572,11 +675,11 @@ class Scheduler:
             return False
 
     def requeue_retry_wait(self, task_id: str) -> bool:
-        """Transition retry_wait → queued.
-        
+        """Transition retry_wait → queued with delay enforcement.
+
         Args:
             task_id: Task ID to requeue
-            
+
         Returns:
             True if requeued
         """
@@ -584,7 +687,7 @@ class Scheduler:
             conn = self._get_connection()
             cursor = conn.cursor()
             
-            cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
+            cursor.execute("SELECT state, retry_at FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
@@ -594,9 +697,16 @@ class Scheduler:
                 conn.close()
                 return False
             
+            # Check if retry delay has elapsed
+            if row["retry_at"]:
+                retry_at = datetime.fromisoformat(row["retry_at"])
+                if datetime.now(timezone.utc) < retry_at:
+                    conn.close()
+                    return False  # Still in delay period
+            
             to_state = "queued"
             cursor.execute("""
-                UPDATE tasks SET state = ?, updated_at = ?
+                UPDATE tasks SET state = ?, retry_at = NULL, updated_at = ?
                 WHERE id = ?
             """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
             
@@ -613,10 +723,10 @@ class Scheduler:
 
     def requeue_awaiting_review(self, task_id: str) -> bool:
         """Transition awaiting_review → queued.
-        
+
         Args:
             task_id: Task ID to requeue
-            
+
         Returns:
             True if requeued
         """
@@ -653,11 +763,11 @@ class Scheduler:
 
     def transition_awaiting_review_to_failed(self, task_id: str, error: Optional[str] = None) -> bool:
         """Transition awaiting_review → failed_terminal.
-        
+
         Args:
             task_id: Task ID
             error: Optional error message
-            
+
         Returns:
             True if transitioned
         """
@@ -694,11 +804,11 @@ class Scheduler:
             return False
 
     def transition_running_to_awaiting_review(self, task_id: str) -> bool:
-        """Transition running → awaiting_review.
-        
+        """Transition running → awaiting_review, closing current attempt.
+
         Args:
             task_id: Task ID
-            
+
         Returns:
             True if transitioned
         """
@@ -716,6 +826,9 @@ class Scheduler:
                 conn.close()
                 return False
             
+            # Close current attempt before transitioning
+            self._close_current_attempt(task_id)
+            
             to_state = "awaiting_review"
             cursor.execute("""
                 UPDATE tasks SET state = ?, updated_at = ?
@@ -723,7 +836,8 @@ class Scheduler:
             """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
             
             if cursor.rowcount > 0:
-                self._emit_event(task_id, "task_started",
+                # Emit awaiting_review event (not task_started which is misleading)
+                self._emit_event(task_id, "task_awaiting_review",
                                from_state="running", to_state=to_state)
                 conn.commit()
                 

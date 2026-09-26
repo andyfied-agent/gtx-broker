@@ -13,14 +13,14 @@ The scheduler logs all state transitions to the `task_events` table. Each event 
 
 ### Task Lifecycle Events
 
-| Event Type | Description | When Generated |
+|| Event Type | Description | When Generated |
 |------------|-------------|----------------|
 | `task_added` | New task admitted to queue | `add_task()` succeeds |
 | `task_claimed` | Task reserved for processing | `claim_task()` succeeds |
 | `task_started` | Task execution begins | `start_task()` succeeds |
+| `task_awaiting_review` | Task sent for human review | `transition_running_to_awaiting_review()` succeeds |
 | `task_completed` | Task finished successfully/failed | `complete_task()` called |
-| `task_failed` | Task failed permanently | `complete_task()` with error |
-| `task_cancelled` | Task cancelled by operator | `cancel_task()` (future) |
+| `task_cancelled` | Task cancelled by operator | `cancel_task()` succeeds |
 
 ### Worker Assignment Events
 
