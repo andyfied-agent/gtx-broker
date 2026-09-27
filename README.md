@@ -43,3 +43,14 @@ The package has no runtime dependencies outside the Python standard library.
 Workstation and Telegram integration remain separate deployment concerns and
 are verified on compute01 before their local compatibility imports are removed.
 
+
+
+## Database Migrations
+
+The scheduler uses a migration runner for schema changes:
+
+- Migrations are stored in `gtx_broker/scheduler/migrations/`
+- Each migration file is idempotent (safe to run multiple times)
+- Run automatically on scheduler initialization
+- Current migrations:
+  - `001_add_tagging.sql`: Task tagging columns and batch_epochs table
