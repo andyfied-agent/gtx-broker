@@ -12,6 +12,9 @@ dependencies = ["python-magic"]
 [tool.setuptools]
 packages = ["gtx_broker", "gtx_broker.scheduler", "second_shift"]
 
+[tool.setuptools.package-data]
+"gtx_broker.scheduler" = ["migrations/*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

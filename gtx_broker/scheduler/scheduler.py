@@ -67,6 +67,7 @@ class Scheduler:
 
         # Initialize database schema and run migrations
         self._init_db()
+        self._upgrade_columns_if_missing()
         self._migrations = MigrationRunner(self.config.db_path)
         if not self._migrations.run_all():
             import logging
@@ -75,6 +76,42 @@ class Scheduler:
 
         # Initialize default workers
         initialize_workers(self.db_path)
+
+    def _upgrade_columns_if_missing(self) -> None:
+        """Add missing columns to existing tasks table.
+        
+        This handles upgrade from old schema where tasks table doesn't have
+        review_tag, schedule_type, or batch_epoch_id columns.
+        """
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            # Get current column names
+            cursor.execute("PRAGMA table_info(tasks)")
+            current_columns = {row[1] for row in cursor.fetchall()}
+            
+            # Add missing columns
+            new_columns = [
+                ("review_tag", "TEXT"),
+                ("schedule_type", "TEXT"),
+                ("batch_epoch_id", "TEXT"),
+            ]
+            
+            for col_name, col_type in new_columns:
+                if col_name not in current_columns:
+                    cursor.execute(f"ALTER TABLE tasks ADD COLUMN {col_name} {col_type}")
+                    logger.info(f"Added column {col_name} to tasks table")
+            
+            conn.commit()
+            conn.close()
+            
+        except sqlite3.Error as e:
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to upgrade tasks table schema: {e}")
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get database connection with WAL mode and longer timeout."""
