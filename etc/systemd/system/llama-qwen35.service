@@ -1,0 +1,29 @@
+# systemd unit for llama-qwen35.service
+# This unit reads configuration from /etc/llama-cpp/p40-active.conf
+
+[Unit]
+Description=llama.cpp Qwen3.5 server (P40)
+After=network.target
+
+[Service]
+Type=forking
+User=andyfied
+Group=andyfied
+WorkingDirectory=/home/andyfied
+# Read active profile configuration
+EnvironmentFile=/etc/llama-cpp/p40-active.conf
+ExecStart=/home/andyfied/.local/bin/llama-server \
+    --model ${MODEL_PATH} \
+    --chat-template ${CHAT_TEMPLATE} \
+    --n-gpu-layers ${GPU_LAYERS} \
+    --ctx-size ${CONTEXT_SIZE} \
+    --server-pool-count ${SERVER_SLOTS} \
+    --mmap \
+    --host 127.0.0.1 \
+    --port 11436
+ExecStop=/bin/kill -SIGTERM $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
