@@ -94,19 +94,15 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
 
     def _handle_queue_stats(self):
         """Get queue statistics."""
-        queued = self.scheduler.get_tasks_by_state("queued")
-        claimed = self.scheduler.get_tasks_by_state("claimed")
-        running = self.scheduler.get_tasks_by_state("running")
-        completed = self.scheduler.get_tasks_by_state("succeeded")
-        failed = self.scheduler.get_tasks_by_state("failed_terminal")
-
+        depths = self.scheduler.get_queue_depths()
+        
         response = {
-            "queued": len(queued),
-            "claimed": len(claimed),
-            "running": len(running),
-            "succeeded": len(completed),
-            "failed": len(failed),
-            "total": len(queued) + len(claimed) + len(running) + len(completed) + len(failed),
+            "queued": depths.get("queued", 0),
+            "claimed": depths.get("claimed", 0),
+            "running": depths.get("running", 0),
+            "succeeded": depths.get("succeeded", 0),
+            "failed": depths.get("failed_terminal", 0),
+            "total": sum(depths.values()),
         }
         self._send_json_response(response)
 
@@ -133,7 +129,8 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
 
         # Count tasks with higher priority that were created earlier
         # This matches the scheduler's priority-based ordering
-        all_queued = self.scheduler.get_tasks_by_state("queued")
+        # Use limit=None to avoid the 100-task cap bug
+        all_queued = self.scheduler.get_tasks_by_state("queued", limit=None)
         my_priority = task.get("priority", 0)
         my_created = task.get("created_at", "")
 

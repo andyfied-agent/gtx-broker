@@ -643,18 +643,37 @@ class Scheduler:
             return None
 
     def get_tasks_by_state(self, state: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """Return durable tasks in one state for operator workflows."""
-        if not state or limit < 1:
+        """Return durable tasks in one state for operator workflows.
+        
+        Args:
+            state: Task state to filter by
+            limit: Maximum number of tasks to return. Use limit=None for unlimited results.
+        
+        Returns:
+            List of task dicts matching the state
+        """
+        if not state:
             return []
         try:
             conn = self._get_connection()
-            rows = conn.execute(
-                """SELECT * FROM tasks
-                   WHERE state = ?
-                   ORDER BY updated_at ASC, id ASC
-                   LIMIT ?""",
-                (state, limit),
-            ).fetchall()
+            if limit is None:
+                # No limit - fetch all tasks in state
+                rows = conn.execute(
+                    """SELECT * FROM tasks
+                       WHERE state = ?
+                       ORDER BY updated_at ASC, id ASC""",
+                    (state,),
+                ).fetchall()
+            else:
+                if limit < 1:
+                    return []
+                rows = conn.execute(
+                    """SELECT * FROM tasks
+                       WHERE state = ?
+                       ORDER BY updated_at ASC, id ASC
+                       LIMIT ?""",
+                    (state, limit),
+                ).fetchall()
             conn.close()
             return [self._row_to_dict(row) for row in rows]
         except sqlite3.OperationalError:
