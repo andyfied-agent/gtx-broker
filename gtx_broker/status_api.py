@@ -51,7 +51,7 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             # Get single task status
             task_id = self.path.split("/")[-1]
             self._handle_task_status(task_id)
-        elif self.path == "/queue":
+        elif parsed.path == "/queue":
             # Get queue statistics or position
             if "task_id" in query:
                 task_id = query["task_id"][0]

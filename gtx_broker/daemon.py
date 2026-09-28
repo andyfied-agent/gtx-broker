@@ -185,39 +185,42 @@ class SchedulerDaemon:
         logger.info(f"Starting daemon with poll interval {poll_interval}s")
         self._running = True
 
-        while self._running:
-            try:
-                if time.monotonic() - self._last_retention_cleanup >= 86400:
-                    self._run_retention_cleanup()
-                    self._last_retention_cleanup = time.monotonic()
-                # Try to get a queued task first
-                task = self.scheduler.get_next_task()
-                
-                # If no queued task, check for retry_wait tasks and promote them
-                if not task:
-                    retry_task = self.scheduler.get_retry_wait_task()
-                    if retry_task:
-                        # Promote retry_wait → queued using existing requeue_retry_wait()
-                        promoted = self.scheduler.requeue_retry_wait(retry_task['id'])
-                        if promoted:
-                            logger.debug(f"Promoted task {retry_task['id']} from retry_wait to queued")
-                            # Now get the promoted task
-                            task = self.scheduler.get_next_task()
+        try:
+            while self._running:
+                try:
+                    if time.monotonic() - self._last_retention_cleanup >= 86400:
+                        self._run_retention_cleanup()
+                        self._last_retention_cleanup = time.monotonic()
+                    # Try to get a queued task first
+                    task = self.scheduler.get_next_task()
+                    
+                    # If no queued task, check for retry_wait tasks and promote them
+                    if not task:
+                        retry_task = self.scheduler.get_retry_wait_task()
+                        if retry_task:
+                            # Promote retry_wait → queued using existing requeue_retry_wait()
+                            promoted = self.scheduler.requeue_retry_wait(retry_task['id'])
+                            if promoted:
+                                logger.debug(f"Promoted task {retry_task['id']} from retry_wait to queued")
+                                # Now get the promoted task
+                                task = self.scheduler.get_next_task()
+                            else:
+                                logger.debug(f"Failed to promote task {retry_task['id']}, skipping")
                         else:
-                            logger.debug(f"Failed to promote task {retry_task['id']}, skipping")
+                            logger.debug("No tasks available (queued or retry_wait), waiting...")
                     else:
-                        logger.debug("No tasks available (queued or retry_wait), waiting...")
-                else:
-                    logger.info(f"Processing task {task['id']} (kind={task['kind']})")
-                    self._dispatch_task(task)
-                    continue  # Skip the no-task check below
-                
-            except Exception as e:
-                logger.exception(f"Error in daemon loop: {e}")
+                        logger.info(f"Processing task {task['id']} (kind={task['kind']})")
+                        self._dispatch_task(task)
+                        continue  # Skip the no-task check below
+                    
+                except Exception as e:
+                    logger.exception(f"Error in daemon loop: {e}")
 
-            time.sleep(poll_interval)
-
-        logger.info("Daemon stopped")
+                time.sleep(poll_interval)
+        finally:
+            if self._api:
+                self._api.shutdown()
+            logger.info("Daemon stopped")
 
     def _get_worker_for_task(self, task_or_kind: Any) -> Optional[str]:
         """Get an available worker for a task, including review routing.
