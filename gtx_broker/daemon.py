@@ -4,6 +4,8 @@ import logging
 from contextlib import nullcontext
 import os
 import signal
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -11,6 +13,7 @@ from typing import Any, Dict, Optional
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
 from gtx_broker.scheduler.handlers import HandlerResult, get_handler_for_task
 from gtx_broker.scheduler.model_profiles import ModelProfileError, P40ModelProfileController
+from gtx_broker.status_api import start_status_api
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +44,10 @@ class SchedulerDaemon:
         self._recover_interrupted_tasks()
         self._run_retention_cleanup()
         self._last_retention_cleanup = time.monotonic()
-
+        
+        # Start status API server
+        self._start_status_api()
+        
         logger.info("Scheduler daemon initialized")
 
     @staticmethod
@@ -142,6 +148,17 @@ class SchedulerDaemon:
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+
+    def _start_status_api(self):
+        """Start status API server in background thread."""
+        port = int(os.getenv("GTX_BROKER_STATUS_PORT", "11439"))
+        self._api_thread = threading.Thread(
+            target=start_status_api,
+            args=("127.0.0.1", port),
+            daemon=True
+        )
+        self._api_thread.start()
+        logger.info(f"Status API started on port {port}")
 
     def run(self, poll_interval: int = 5):
         """Run the daemon loop.
