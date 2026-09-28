@@ -15,6 +15,8 @@ import logging
 import os
 import socket
 import subprocess
+import urllib.request
+import urllib.error
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional
@@ -53,7 +55,7 @@ class P40ModelProfileController:
     This controller provides:
     1. Exclusive file-based lease for profile operations
     2. Profile inspection via /v1/models endpoint
-    3. Profile switching via root-owned wrapper script
+    3. Profile switching via root wrapper script
     4. Layered verification (systemd → health → models → slots → smoke test)
     5. Runtime remediation of WRONG_MODEL_LOADED alerts
     
@@ -66,6 +68,7 @@ class P40ModelProfileController:
     SWITCH_WRAPPER_PATH = "/usr/local/sbin/compute01-maint/p40-switch-profile"
     LOCK_DIR = Path("/run/lock/gtx-broker")
     LOCK_FILE = LOCK_DIR / "p40-profile.lock"
+    ACTIVE_CONFIG = Path("/etc/llama-cpp/p40-active.conf")
     SERVICE_NAME = "llama-qwen35.service"
     
     # API endpoints
@@ -134,18 +137,6 @@ class P40ModelProfileController:
         if not self.LOCK_DIR.exists():
             try:
                 self.LOCK_DIR.mkdir(parents=True, mode=0o770)
-                # Set group to gtx-broker (will fail if user not in group, but that's OK)
-                try:
-                    os.chown(self.LOCK_DIR, 0, -1)  # root
-                    # Try to set group - may fail if group doesn't exist
-                    try:
-                        import grp
-                        gtx_group = grp.getgrnam("gtx-broker")
-                        os.chown(self.LOCK_DIR, 0, gtx_group.gr_gid)
-                    except KeyError:
-                        logger.warning("gtx-broker group not found, using root ownership")
-                except PermissionError:
-                    logger.warning(f"Could not set ownership of {self.LOCK_DIR}")
             except OSError as exc:
                 logger.error(f"Failed to create lock directory: {exc}")
                 raise
@@ -168,13 +159,16 @@ class P40ModelProfileController:
             except (IOError, OSError) as exc:
                 if not blocking:
                     logger.debug(f"Could not acquire lease (non-blocking): {exc}")
+                    # Close fd before returning None
+                    if lock_fd is not None:
+                        os.close(lock_fd)
                     return None
                 logger.error(f"Could not acquire lease: {exc}")
                 raise
         
         except Exception as exc:
             logger.error(f"Lease acquisition failed: {exc}")
-            if lock_fd:
+            if lock_fd is not None:
                 try:
                     os.close(lock_fd)
                 except Exception:
@@ -193,38 +187,17 @@ class P40ModelProfileController:
                 logger.warning(f"Lease release failed: {exc}")
     
     def _get_current_model_id(self) -> Optional[str]:
-        """Query /v1/models to get currently loaded model ID."""
+        """Query /v1/models to get currently loaded model ID using urllib."""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(5.0)
-                sock.connect((self.HOST, self.PORT))
-                
-                request = f"GET {self.MODELS_URL.split('://')[1]} HTTP/1.1\r\n"
-                request += f"Host: {self.HOST}:{self.PORT}\r\n"
-                request += "Connection: close\r\n\r\n"
-                
-                sock.sendall(request.encode())
-                response = b""
-                while True:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    response += chunk
-                
-                # Parse JSON response
-                body_start = response.find(b"\r\n\r\n")
-                if body_start == -1:
-                    return None
-                
-                body = response[body_start + 4:].decode("utf-8", errors="ignore")
-                data = json.loads(body)
+            with urllib.request.urlopen(self.MODELS_URL, timeout=5.0) as response:
+                data = json.loads(response.read().decode("utf-8"))
                 
                 if "data" in data and len(data["data"]) > 0:
                     return data["data"][0].get("id")
                 
                 return None
         
-        except (socket.error, json.JSONDecodeError, OSError) as exc:
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
             logger.debug(f"Failed to query /v1/models: {exc}")
             return None
     
@@ -242,90 +215,76 @@ class P40ModelProfileController:
             return False
     
     def _check_health(self) -> bool:
-        """Check /health endpoint."""
+        """Check /health endpoint using urllib."""
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(5.0)
-                sock.connect((self.HOST, self.PORT))
-                
-                request = f"GET /health HTTP/1.1\r\n"
-                request += f"Host: {self.HOST}:{self.PORT}\r\n"
-                request += "Connection: close\r\n\r\n"
-                
-                sock.sendall(request.encode())
-                response = b""
-                while True:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    response += chunk
-                
-                return response.startswith(b"HTTP/1.1 200")
-        
-        except (socket.error, OSError) as exc:
+            with urllib.request.urlopen(self.HEALTH_URL, timeout=5.0) as response:
+                return response.status == 200
+        except urllib.error.URLError as exc:
             logger.debug(f"Health check failed: {exc}")
             return False
     
     def _run_smoke_test(self, profile_name: str) -> bool:
-        """Run smoke test for profile."""
+        """Run smoke test for profile using urllib."""
         profile = self._profiles.get(profile_name)
         if not profile:
             logger.error(f"Profile not found: {profile_name}")
             return False
         
+        # Check vision profile test image
+        if "vision" in profile_name:
+            test_image = "/usr/local/share/gtx-broker/test-images/receipt_small.jpg"
+            if not os.path.exists(test_image):
+                logger.error("Vision test image not found: %s", test_image)
+                return False
+        
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.settimeout(30.0)
-                sock.connect((self.HOST, self.PORT))
-                
-                if "vision" in profile_name:
-                    # Multimodal smoke test would require image upload
-                    # For now, do text-only test
-                    prompt = "Reply with exactly: OK"
-                else:
-                    prompt = "Reply with exactly: OK"
+            url = self.CHAT_COMPLETIONS_URL
+            
+            if "vision" in profile_name:
+                # Multimodal smoke test
+                import base64
+                test_image = "/usr/local/share/gtx-broker/test-images/receipt_small.jpg"
+                with open(test_image, "rb") as f:
+                    image_data = base64.b64encode(f.read()).decode("utf-8")
                 
                 message = {
-                    "model": profile.model_family.replace(".", "-"),
-                    "messages": [{"role": "user", "content": prompt}],
+                    "model": profile.expected_model_id,
+                    "messages": [{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}},
+                            {"type": "text", "text": "Extract the total amount from this receipt. Reply with exactly: 29.24"}
+                        ]
+                    }],
+                    "max_tokens": 16,
+                    "temperature": 0
+                }
+            else:
+                # Text-only smoke test
+                message = {
+                    "model": profile.expected_model_id,
+                    "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
                     "max_tokens": 8,
                     "temperature": 0
                 }
+            
+            data = json.dumps(message).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            
+            with urllib.request.urlopen(req, timeout=30.0) as response:
+                result = json.loads(response.read().decode("utf-8"))
                 
-                import json
-                body = json.dumps(message)
-                
-                request = f"POST {self.CHAT_COMPLETIONS_URL.split('://')[1]} HTTP/1.1\r\n"
-                request += f"Host: {self.HOST}:{self.PORT}\r\n"
-                request += "Content-Type: application/json\r\n"
-                request += f"Content-Length: {len(body)}\r\n"
-                request += "Connection: close\r\n\r\n"
-                request += body
-                
-                sock.sendall(request.encode())
-                response = b""
-                while True:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    response += chunk
-                
-                body_start = response.find(b"\r\n\r\n")
-                if body_start == -1:
-                    return False
-                
-                body = response[body_start + 4:].decode("utf-8", errors="ignore")
-                data = json.loads(body)
-                
-                # Check for "OK" in response
-                if "choices" in data and len(data["choices"]) > 0:
-                    content = data["choices"][0].get("message", {}).get("content", "")
-                    if "OK" in content:
-                        return True
+                # Check for expected response
+                if "choices" in result and len(result["choices"]) > 0:
+                    content = result["choices"][0].get("message", {}).get("content", "")
+                    if "vision" in profile_name:
+                        return "29.24" in content
+                    else:
+                        return "OK" in content
                 
                 return False
         
-        except (socket.error, json.JSONDecodeError, OSError) as exc:
+        except (urllib.error.URLError, json.JSONDecodeError, OSError) as exc:
             logger.debug(f"Smoke test failed: {exc}")
             return False
     
@@ -443,16 +402,73 @@ class P40ModelProfileController:
         
         return True
     
-    @contextmanager
-    def profile(self, profile_name: str) -> Iterator[None]:
-        """Context manager for temporary profile switching (legacy API).
+    def _ensure_profile_locked(self, profile_name: str) -> bool:
+        """Internal method to ensure profile while holding lease.
         
-        This retains the original context-manager API for simple cases
-        where an exclusive lease is not needed. For full runtime profile
-        management, use ensure_profile() instead.
+        Called by profile() context manager to hold lock during execution.
         
         Args:
-            profile_name: Profile name to use temporarily
+            profile_name: Profile name to ensure
+        
+        Returns:
+            True if profile is active, False if failed
+        """
+        lock_fd = self._acquire_lease(blocking=True)
+        
+        try:
+            if profile_name not in self._profiles:
+                logger.error(f"Unknown profile: {profile_name}")
+                return False
+            
+            current_model = self._get_current_model_id()
+            expected_model = self._profiles[profile_name].expected_model_id
+            
+            if current_model != expected_model:
+                if not os.path.exists(self.SWITCH_WRAPPER_PATH):
+                    logger.error(f"Switch wrapper not found: {self.SWITCH_WRAPPER_PATH}")
+                    return False
+                
+                try:
+                    result = subprocess.run(
+                        [self.SWITCH_WRAPPER_PATH, profile_name],
+                        capture_output=True,
+                        text=True,
+                        timeout=120
+                    )
+                    
+                    if result.returncode != 0:
+                        logger.error(f"Profile switch failed: {result.stderr}")
+                        return False
+                    
+                    logger.info(f"Profile switch completed: {profile_name}")
+                
+                except subprocess.TimeoutExpired:
+                    logger.error(f"Profile switch timed out: {profile_name}")
+                    return False
+            
+            if not self._verify_profile_switch(profile_name):
+                logger.error(f"Profile switch verification failed: {profile_name}")
+                return False
+            
+            self._current_profile = profile_name
+            return True
+        
+        except Exception as exc:
+            logger.error(f"_ensure_profile_locked failed: {exc}")
+            return False
+        
+        finally:
+            self._release_lease(lock_fd)
+    
+    @contextmanager
+    def profile(self, profile_name: str) -> Iterator[None]:
+        """Context manager for running work under a profile with lease held.
+        
+        Acquires exclusive lease, ensures profile, and holds lock for the
+        entire duration of the context (including task execution).
+        
+        Args:
+            profile_name: Profile name to use
         
         Yields:
             None - use this context to run work under the profile
@@ -463,7 +479,7 @@ class P40ModelProfileController:
         if profile_name not in self._profiles:
             raise ModelProfileError(f"Unknown profile: {profile_name}")
         
-        if not self.ensure_profile(profile_name):
+        if not self._ensure_profile_locked(profile_name):
             raise ModelProfileError(f"Could not switch to profile {profile_name}")
         
         try:

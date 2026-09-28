@@ -7,7 +7,7 @@ name = "gtx-broker"
 version = "0.1.0"
 description = "Deterministic task scoping, routing, and escalation controller"
 requires-python = ">=3.10"
-dependencies = ["Pillow", "python-magic"]
+dependencies = ["Pillow", "python-magic", "PyYAML"]
 
 [project.scripts]
 gtx-image-ingress = "gtx_broker.telegram_ingress:main"
