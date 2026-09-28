@@ -1,0 +1,41 @@
+#!/bin/bash
+# p40-profile-launcher - Profile-specific launcher for llama-server with vision support
+# Usage: p40-profile-launcher <profile-name>
+
+set -euo pipefail
+
+PROFILE_NAME="$1"
+PROFILES_DIR="/etc/llama-cpp/profiles"
+CONF_FILE="$PROFILES_DIR/${PROFILE_NAME}.conf"
+
+if [[ ! -f "$CONF_FILE" ]]; then
+    echo "Error: Profile config not found: $CONF_FILE" >&2
+    exit 1
+fi
+
+source "$CONF_FILE"
+
+BASE_ARGS=(
+    "--model" "${MODEL_PATH}"
+    "--chat-template" "${CHAT_TEMPLATE}"
+    "--n-gpu-layers" "${GPU_LAYERS}"
+    "--ctx-size" "${CONTEXT_SIZE}"
+    "--parallel" "${SERVER_SLOTS}"
+    "--mmap"
+    "--host" "127.0.0.1"
+    "--port" "11436"
+)
+
+if [[ -n "${MMPROJ_PATH:-}" ]]; then
+    BASE_ARGS+=(
+        "--mmap"
+        "--mmproj" "${MMPROJ_PATH}"
+        "--mllm" "yes"
+    )
+fi
+
+echo "[INFO] Launching llama-server for profile: $PROFILE_NAME"
+echo "[INFO] Model: $MODEL_PATH"
+[[ -n "${MMPROJ_PATH:-}" ]] && echo "[INFO] Projector: $MMPROJ_PATH"
+
+exec /home/andyfied/.local/bin/llama-server "${BASE_ARGS[@]}"
