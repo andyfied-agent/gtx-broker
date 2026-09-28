@@ -1,78 +1,83 @@
-"""Queue status and cancellation API for GTX broker."""
+"""HTTP API for scheduler status, queue info, and task cancellation.
+
+This module provides a single HTTP server instance that shares the scheduler
+and database connection across all requests, avoiding per-request initialization.
+"""
 
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Optional
-from urllib.parse import urlparse, parse_qs
-import sqlite3
+import logging
+import os
+import socket
+import threading
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
+from typing import Any, Dict, Optional
 
-from gtx_broker.scheduler import Scheduler, SchedulerConfig
+from gtx_broker.scheduler import Scheduler
+
+logger = logging.getLogger(__name__)
 
 
 class StatusAPIHandler(BaseHTTPRequestHandler):
-    """HTTP handler for queue status and cancellation API."""
-    
+    """HTTP request handler for scheduler status and queue management."""
+
+    scheduler: Scheduler  # Set by server on each request
+    server_instance: "StatusAPI" = None  # Reference to server for shutdown
+
     def log_message(self, format, *args):
-        """Suppress default logging."""
+        """Suppress default HTTP logging for cleaner output."""
         pass
-    
+
+    def _send_json_response(self, data: Dict[str, Any], status: int = 200):
+        """Send JSON response with proper headers."""
+        response_body = json.dumps(data, indent=2).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response_body)))
+        self.end_headers()
+        self.wfile.write(response_body)
+
+    def _send_error_response(self, message: str, status: int = 400):
+        """Send error response."""
+        self._send_json_response({"error": message}, status)
+
     def do_GET(self):
-        """Handle GET requests for task status."""
-        parsed = urlparse(self.path)
-        
-        if parsed.path == "/status":
-            # List all tasks (admin view)
-            self._list_tasks()
-        elif parsed.path.startswith("/status/"):
-            # Get specific task status
-            task_id = parsed.path[len("/status/"):]
-            self._get_task_status(task_id)
-        elif parsed.path == "/queue":
-            # Get queue statistics
-            self._get_queue_status()
+        """Handle GET requests."""
+        parsed = urllib.parse.urlparse(self.path)
+        query = urllib.parse.parse_qs(parsed.query)
+
+        if self.path.startswith("/status/"):
+            # Get single task status
+            task_id = self.path.split("/")[-1]
+            self._handle_task_status(task_id)
+        elif self.path == "/queue":
+            # Get queue statistics or position
+            if "task_id" in query:
+                task_id = query["task_id"][0]
+                self._handle_queue_position(task_id)
+            else:
+                self._handle_queue_stats()
         else:
-            self.send_response(404)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "Not found"}).encode())
-    
+            self._send_error_response("Not found", 404)
+
     def do_POST(self):
-        """Handle POST requests for task cancellation."""
-        parsed = urlparse(self.path)
-        
-        if parsed.path == "/cancel":
-            # Cancel a task
-            self._cancel_task()
+        """Handle POST requests."""
+        if self.path == "/cancel":
+            self._handle_cancel()
         else:
-            self.send_response(404)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "Not found"}).encode())
-    
-    def _get_scheduler(self) -> Scheduler:
-        """Get scheduler instance."""
-        db_path = "/mnt/scratch/gtx-images/metadata/tasks.db"
-        config = SchedulerConfig(db_path=db_path)
-        return Scheduler(config)
-    
-    def _get_task_status(self, task_id: str):
-        """Get status of a specific task."""
-        scheduler = self._get_scheduler()
-        task = scheduler.get_task(task_id)
-        
+            self._send_error_response("Not found", 404)
+
+    def _handle_task_status(self, task_id: str):
+        """Get status for a specific task."""
+        task = self.scheduler.get_task(task_id)
         if not task:
-            self.send_response(404)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "error": "Task not found",
-                "task_id": task_id
-            }).encode())
+            self._send_error_response("Task not found", 404)
             return
-        
+
         # Get recent events
-        events = self._get_task_events(task_id, limit=5)
-        
+        events = self.scheduler.get_task_events(task_id, limit=5)
+
         response = {
             "task_id": task_id,
             "state": task.get("state"),
@@ -80,212 +85,185 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
             "priority": task.get("priority"),
             "mode": task.get("mode"),
             "schedule_type": task.get("schedule_type"),
+            "worker_profile": task.get("worker_profile"),
             "created_at": task.get("created_at"),
             "updated_at": task.get("updated_at"),
             "events": events,
         }
-        
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(response, indent=2).encode())
-    
-    def _get_task_events(self, task_id: str, limit: int = 5) -> list:
-        """Get recent events for a task."""
-        try:
-            scheduler = self._get_scheduler()
-            conn = scheduler._get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT event_type, from_state, to_state, details, created_at
-                FROM task_events
-                WHERE task_id = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-            """, (task_id, limit))
-            
-            events = []
-            for row in cursor.fetchall():
-                events.append({
-                    "event_type": row[0],
-                    "from_state": row[1],
-                    "to_state": row[2],
-                    "details": row[3],
-                    "created_at": row[4],
-                })
-            
-            conn.close()
-            return events
-        except Exception as e:
-            return [{"error": str(e)}]
-    
-    def _list_tasks(self):
-        """List all tasks (admin view)."""
-        scheduler = self._get_scheduler()
-        
-        # Get all tasks
-        conn = scheduler._get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT id, kind, state, priority, mode, schedule_type, 
-                   created_at, updated_at
-            FROM tasks
-            ORDER BY created_at DESC
-            LIMIT 50
-        """)
-        
-        tasks = []
-        for row in cursor.fetchall():
-            tasks.append({
-                "task_id": row[0],
-                "kind": row[1],
-                "state": row[2],
-                "priority": row[3],
-                "mode": row[4],
-                "schedule_type": row[5],
-                "created_at": row[6],
-                "updated_at": row[7],
-            })
-        
-        conn.close()
-        
-        response = {
-            "count": len(tasks),
-            "tasks": tasks,
-        }
-        
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(response, indent=2).encode())
-    
-    def _get_queue_status(self):
+        self._send_json_response(response)
+
+    def _handle_queue_stats(self):
         """Get queue statistics."""
-        parsed = urlparse(self.path)
-        scheduler = self._get_scheduler()
-        
-        conn = scheduler._get_connection()
-        cursor = conn.cursor()
-        
-        # Get counts by state
-        cursor.execute("SELECT state, COUNT(*) FROM tasks GROUP BY state")
-        state_counts = dict(cursor.fetchall())
-        
-        # Get queue position for a specific task if provided
-        params = parse_qs(parsed.query)
-        task_id_param = params.get("task_id", [None])[0] if "task_id" in params else None
-        
-        if task_id_param:
-            # Calculate queue position
-            cursor.execute("""
-                SELECT COUNT(*) FROM tasks
-                WHERE state = 'queued'
-                AND (priority > (SELECT priority FROM tasks WHERE id = ?)
-                     OR (priority = (SELECT priority FROM tasks WHERE id = ?)
-                         AND created_at < (SELECT created_at FROM tasks WHERE id = ?)))
-            """, (task_id_param, task_id_param, task_id_param))
-            queue_position = cursor.fetchone()[0] + 1
-        else:
-            queue_position = None
-        
-        conn.close()
-        
+        queued = self.scheduler.get_tasks_by_state("queued")
+        claimed = self.scheduler.get_tasks_by_state("claimed")
+        running = self.scheduler.get_tasks_by_state("running")
+        completed = self.scheduler.get_tasks_by_state("succeeded")
+        failed = self.scheduler.get_tasks_by_state("failed_terminal")
+
         response = {
-            "queue_stats": state_counts,
-            "total_queued": state_counts.get("queued", 0),
-            "total_claimed": state_counts.get("claimed", 0),
-            "total_running": state_counts.get("running", 0),
-            "total_completed": state_counts.get("succeeded", 0),
-            "total_failed": state_counts.get("failed_terminal", 0) + state_counts.get("cancelled", 0),
-            "queue_position": queue_position,
+            "queued": len(queued),
+            "claimed": len(claimed),
+            "running": len(running),
+            "succeeded": len(completed),
+            "failed": len(failed),
+            "total": len(queued) + len(claimed) + len(running) + len(completed) + len(failed),
         }
+        self._send_json_response(response)
+
+    def _handle_queue_position(self, task_id: str):
+        """Get queue position for a specific task.
         
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(json.dumps(response, indent=2).encode())
-    
-    def _cancel_task(self):
+        Only returns position for tasks in 'queued' state.
+        Returns None for tasks not in queue.
+        """
+        task = self.scheduler.get_task(task_id)
+        if not task:
+            self._send_error_response("Task not found", 404)
+            return
+
+        state = task.get("state")
+        if state != "queued":
+            self._send_json_response({
+                "task_id": task_id,
+                "state": state,
+                "queue_position": None,
+                "note": f"Not in queue (state: {state})",
+            })
+            return
+
+        # Count tasks with higher priority that were created earlier
+        # This matches the scheduler's priority-based ordering
+        all_queued = self.scheduler.get_tasks_by_state("queued")
+        my_priority = task.get("priority", 0)
+        my_created = task.get("created_at", "")
+
+        position = 1
+        for other in all_queued:
+            if other["id"] == task_id:
+                continue
+            other_priority = other.get("priority", 0)
+            other_created = other.get("created_at", "")
+
+            # Higher priority first, then earlier creation time
+            if other_priority > my_priority:
+                position += 1
+            elif other_priority == my_priority and other_created < my_created:
+                position += 1
+
+        self._send_json_response({
+            "task_id": task_id,
+            "state": state,
+            "queue_position": position,
+            "total_queued": len(all_queued),
+        })
+
+    def _handle_cancel(self):
         """Cancel a task."""
+        # Read request body
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            self._send_error_response("Request body required", 400)
+            return
+
+        body = self.rfile.read(content_length)
         try:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
             data = json.loads(body.decode("utf-8"))
-            
-            task_id = data.get("task_id")
-            if not task_id:
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "error": "task_id is required",
-                    "usage": "POST /cancel with {\"task_id\": \"<task_id>\"}"
-                }).encode())
-                return
-            
-            scheduler = self._get_scheduler()
-            
-            # Try to cancel
-            success = scheduler.cancel_task(task_id)
-            
-            if success:
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "success": True,
-                    "message": f"Task {task_id} cancelled",
-                    "task_id": task_id,
-                }).encode())
-            else:
-                task = scheduler.get_task(task_id)
-                if not task:
-                    self.send_response(404)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        "success": False,
-                        "error": "Task not found",
-                        "task_id": task_id,
-                    }).encode())
-                else:
-                    self.send_response(400)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({
-                        "success": False,
-                        "error": f"Cannot cancel task in state: {task.get('state')}",
-                        "allowed_states": ["queued", "claimed"],
-                        "current_state": task.get("state"),
-                        "task_id": task_id,
-                    }).encode())
-        except (json.JSONDecodeError, TypeError, ValueError) as e:
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "error": f"Invalid request body: {e}"
-            }).encode())
+        except json.JSONDecodeError:
+            self._send_error_response("Invalid JSON", 400)
+            return
+
+        task_id = data.get("task_id")
+        if not task_id:
+            self._send_error_response("task_id required", 400)
+            return
+
+        # Check if task exists
+        task = self.scheduler.get_task(task_id)
+        if not task:
+            self._send_error_response("Task not found", 404)
+            return
+
+        # Check if can be cancelled - only queued or claimed
+        state = task.get("state")
+        if state not in ("queued", "claimed"):
+            self._send_error_response(
+                f"Cannot cancel task in state '{state}'", 400
+            )
+            return
+
+        # Attempt cancellation
+        if self.scheduler.cancel_task(task_id):
+            self._send_json_response({
+                "task_id": task_id,
+                "success": True,
+                "message": f"Task cancelled (was in state: {state})",
+            })
+        else:
+            self._send_error_response("Cancellation failed", 500)
 
 
-def start_status_api(host: str = "127.0.0.1", port: int = 11439) -> None:
-    """Start the status API server in a background thread."""
-    server = HTTPServer((host, port), StatusAPIHandler)
-    thread = __import__('threading').Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    print(f"Status API listening on {host}:{port}")
+class StatusAPI:
+    """HTTP API server wrapper with proper lifecycle management."""
 
+    def __init__(self, scheduler: Scheduler, port: int = 11439):
+        """Initialize API server.
 
-if __name__ == "__main__":
-    import sys
-    print("GTX Broker Status API")
-    print("Endpoints:")
-    print("  GET  /status             - List recent tasks")
-    print("  GET  /status/<task_id>   - Get task status")
-    print("  GET  /queue              - Queue statistics")
-    print("  GET  /queue?task_id=xxx  - Get queue position for task")
-    print("  POST /cancel             - Cancel a task")
-    print("\nStarting server...")
-    start_status_api()
+        Args:
+            scheduler: Shared scheduler instance
+            port: Port to listen on
+        """
+        self.scheduler = scheduler
+        self.port = port
+        self.server: Optional[HTTPServer] = None
+        self._lock = threading.Lock()
+        self._started = False
+
+    def start(self) -> bool:
+        """Start the HTTP server.
+
+        Returns:
+            True if server started successfully, False otherwise
+        """
+        with self._lock:
+            if self._started:
+                return True
+
+            # Check if port is available
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.bind(("127.0.0.1", self.port))
+                sock.close()
+            except OSError as e:
+                logger.error(f"Port {self.port} already in use: {e}")
+                return False
+
+            class ThreadedServer(ThreadingMixIn, HTTPServer):
+                daemon_threads = True
+                allow_reuse_address = True
+
+            try:
+                self.server = ThreadedServer(("127.0.0.1", self.port), StatusAPIHandler)
+                StatusAPIHandler.scheduler = self.scheduler
+                StatusAPIHandler.server_instance = self
+                self._started = True
+                logger.info("Status API server started on port %d", self.port)
+                return True
+            except Exception as e:
+                logger.error("Failed to start status API server: %s", e)
+                return False
+
+    def run_forever(self):
+        """Run server loop in current thread."""
+        if self.server:
+            self.server.serve_forever()
+        else:
+            logger.error("Server not started - cannot run")
+
+    def shutdown(self):
+        """Gracefully shut down the server."""
+        with self._lock:
+            if self.server:
+                self.server.shutdown()
+                self.server = None
+                self._started = False
+                logger.info("Status API server stopped")

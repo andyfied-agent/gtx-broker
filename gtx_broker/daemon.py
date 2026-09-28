@@ -4,16 +4,15 @@ import logging
 from contextlib import nullcontext
 import os
 import signal
-import sys
-import threading
 import time
 from pathlib import Path
+from threading import Thread
 from typing import Any, Dict, Optional
 
 from gtx_broker.scheduler import Scheduler, SchedulerConfig
 from gtx_broker.scheduler.handlers import HandlerResult, get_handler_for_task
 from gtx_broker.scheduler.model_profiles import ModelProfileError, P40ModelProfileController
-from gtx_broker.status_api import start_status_api
+from gtx_broker.status_api import StatusAPI
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +33,45 @@ class SchedulerDaemon:
         Args:
             config: Scheduler config
         """
+        self.config = config
         self.scheduler = Scheduler(config)
         self.storage = self.scheduler._storage
         self.model_profiles = P40ModelProfileController()
         self.retention_days = self._configured_retention_days()
         self._active_tasks: Dict[str, bool] = {}
         self._running = False
+        self._api: Optional[StatusAPI] = None
+        self._api_thread: Optional[Thread] = None
         self._setup_signals()
         self._recover_interrupted_tasks()
         self._run_retention_cleanup()
         self._last_retention_cleanup = time.monotonic()
-        
-        # Start status API server
-        self._start_status_api()
-        
+
         logger.info("Scheduler daemon initialized")
+
+    def _start_status_api(self, port: int = 11439) -> bool:
+        """Start status API server.
+
+        Args:
+            port: Port to listen on (default 11439)
+
+        Returns:
+            True if server started successfully
+        """
+        self._api = StatusAPI(self.scheduler, port)
+        if not self._api.start():
+            logger.warning("Failed to start status API on port %d", port)
+            return False
+        
+        # Start background thread to run server
+        self._api_thread = Thread(
+            target=self._api.run_forever,
+            daemon=True,
+            name="gtx-status-api",
+        )
+        self._api_thread.start()
+        logger.info("Status API server started on port %d", port)
+        return True
 
     @staticmethod
     def _configured_retention_days() -> int:
@@ -149,23 +172,16 @@ class SchedulerDaemon:
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
-    def _start_status_api(self):
-        """Start status API server in background thread."""
-        port = int(os.getenv("GTX_BROKER_STATUS_PORT", "11439"))
-        self._api_thread = threading.Thread(
-            target=start_status_api,
-            args=("127.0.0.1", port),
-            daemon=True
-        )
-        self._api_thread.start()
-        logger.info(f"Status API started on port {port}")
-
-    def run(self, poll_interval: int = 5):
+    def run(self, poll_interval: int = 5, api_port: int = 11439):
         """Run the daemon loop.
 
         Args:
             poll_interval: Seconds between polls (default 5)
+            api_port: Port for status API (default 11439)
         """
+        # Start status API server
+        self._start_status_api(api_port)
+
         logger.info(f"Starting daemon with poll interval {poll_interval}s")
         self._running = True
 
@@ -464,6 +480,7 @@ class SchedulerDaemon:
 
 
 if __name__ == "__main__":
+    import logging
     logging.basicConfig(
         level=os.getenv("GTX_BROKER_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
