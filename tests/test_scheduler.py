@@ -110,7 +110,7 @@ class TestStateTransitions:
         high = scheduler.get_task("high-priority")
         assert low is not None and low["state"] == "queued"
         assert high is not None and high["state"] == "queued"
-        
+
         # Verify priority ordering in database query (not filtered by policy)
         conn = scheduler._get_connection()
         cursor = conn.cursor()
@@ -120,7 +120,7 @@ class TestStateTransitions:
         """)
         rows = cursor.fetchall()
         conn.close()
-        
+
         # High priority (100) should be first
         if rows:
             assert rows[0]["id"] == "high-priority", \
@@ -173,27 +173,27 @@ class TestRetryReviewCancel:
     def test_retry_task_only_from_running(self, scheduler):
         """Test that retry_task() only works from running state."""
         task_id = "task-retry-001"
-        
+
         # Can't retry queued task
         scheduler.add_task(task_id, "vision", {}, "batch", 10, "key-retry-001")
         result = scheduler.retry_task(task_id)
         assert not result, "Cannot retry queued task"
-        
+
         # Must start first
         scheduler.claim_task(task_id)
         scheduler.start_task(task_id, "p40-vision", "p40-vision-qwen35")
-        
+
         # Now can retry from running
         result = scheduler.retry_task(task_id)
         assert result, "Can retry running task"
-        
+
         # Verify state changed to retry_wait
         task = scheduler.get_task(task_id)
         assert task["state"] == "retry_wait"
 
     def test_cancel_task_legal_states(self, scheduler):
         """Test that cancel_task() only works from legal states per STATE_TRANSITIONS.
-        
+
         STATE_TRANSITIONS allows: queued -> cancelled, claimed -> cancelled
         Does NOT allow: running, succeeded, failed_terminal, retry_wait, awaiting_review -> cancelled
         """
@@ -202,14 +202,14 @@ class TestRetryReviewCancel:
         scheduler.add_task(task_id_1, "vision", {}, "batch", 10, "key-cancel-001")
         result = scheduler.cancel_task(task_id_1)
         assert result, "Can cancel queued task"
-        
+
         # Can cancel claimed
         task_id_2 = "task-cancel-002"
         scheduler.add_task(task_id_2, "vision", {}, "batch", 10, "key-cancel-002")
         scheduler.claim_task(task_id_2)
         result = scheduler.cancel_task(task_id_2)
         assert result, "Can cancel claimed task"
-        
+
         # Cannot cancel running
         task_id_3 = "task-cancel-003"
         scheduler.add_task(task_id_3, "vision", {}, "batch", 10, "key-cancel-003")
@@ -217,10 +217,10 @@ class TestRetryReviewCancel:
         scheduler.start_task(task_id_3, "p40-vision", "p40-vision-qwen35")
         result = scheduler.cancel_task(task_id_3)
         assert not result, "Cannot cancel running task"
-        
+
         # Complete task-cancel-003 so it doesn't block subsequent tests
         scheduler.complete_task(task_id_3, result={"ok": True}, error=None)
-        
+
         # Cannot cancel succeeded
         task_id_4 = "task-cancel-004"
         scheduler.add_task(task_id_4, "vision", {}, "batch", 10, "key-cancel-004")
@@ -229,7 +229,7 @@ class TestRetryReviewCancel:
         scheduler.complete_task(task_id_4, result={"ok": True}, error=None)
         result = scheduler.cancel_task(task_id_4)
         assert not result, "Cannot cancel succeeded task"
-        
+
         # Cannot cancel failed_terminal
         task_id_5 = "task-cancel-005"
         scheduler.add_task(task_id_5, "vision", {}, "batch", 10, "key-cancel-005")
@@ -238,7 +238,7 @@ class TestRetryReviewCancel:
         scheduler.complete_task(task_id_5, error="permanent error", failure_class="timeout")
         result = scheduler.cancel_task(task_id_5)
         assert not result, "Cannot cancel failed_terminal task"
-        
+
         # Cannot cancel retry_wait (not in STATE_TRANSITIONS)
         task_id_6 = "task-cancel-006"
         scheduler.add_task(task_id_6, "vision", {}, "batch", 10, "key-cancel-006")
@@ -247,7 +247,7 @@ class TestRetryReviewCancel:
         scheduler.retry_task(task_id_6)
         result = scheduler.cancel_task(task_id_6)
         assert not result, "Cannot cancel retry_wait task (not in STATE_TRANSITIONS)"
-        
+
         # Cannot cancel awaiting_review (not in STATE_TRANSITIONS)
         task_id_7 = "task-cancel-007"
         scheduler.add_task(task_id_7, "vision", {}, "batch", 10, "key-cancel-007")
@@ -403,8 +403,8 @@ class TestWorkerStatusPersistence:
 
         # Mark slow-coder as BUSY
         registry.update_status("slow-coder", WorkerStatus.BUSY)
-        
-        # Mark gtx-chat as MAINTENANCE  
+
+        # Mark gtx-chat as MAINTENANCE
         registry.update_status("gtx-chat", WorkerStatus.MAINTENANCE)
 
         # select_worker should only return available workers
@@ -501,7 +501,7 @@ class TestStorageStagingAndCompletion:
             # (it should be in incoming, created by os.rename)
             assert not (storage.tmp_path / task_id).exists(), \
                 "Task directory should not exist in tmp after staging"
-            
+
             # Verify task is in incoming
             assert (storage.incoming_path / task_id).exists(), \
                 "Task directory should exist in incoming after staging"
@@ -559,7 +559,7 @@ class TestEventLogging:
         events = scheduler.get_task_events(task_id)
         event_types = [e["event_type"] for e in events]
         assert "task_claimed" in event_types, "claim_task() should emit task_claimed event"
-        
+
         # Find the task_claimed event and verify its details
         for event in events:
             if event["event_type"] == "task_claimed":
@@ -573,11 +573,11 @@ class TestEventLogging:
         scheduler.add_task(task_id, "vision", {}, "batch", 10, "key-event-002")
         scheduler.claim_task(task_id)
         scheduler.start_task(task_id, "p40-vision", "p40-vision-qwen35")
-        
+
         # Retry the task
         result = scheduler.retry_task(task_id)
         assert result
-        
+
         # Check event was logged
         events = scheduler.get_task_events(task_id)
         event_types = [e["event_type"] for e in events]
@@ -589,7 +589,7 @@ class TestEventLogging:
         scheduler.add_task(task_id, "vision", {}, "batch", 10, "key-event-003")
         result = scheduler.cancel_task(task_id)
         assert result
-        
+
         # Check event was logged
         events = scheduler.get_task_events(task_id)
         event_types = [e["event_type"] for e in events]
@@ -608,29 +608,29 @@ class TestRetryWaitToQueuedTransition:
     def test_retry_wait_can_be_requeued(self, scheduler):
         """Test that retry_wait tasks can be moved back to queued."""
         task_id = "task-requeue-001"
-        
+
         # Create and process task to retry_wait state
         scheduler.add_task(task_id, "vision", {}, "batch", 10, "key-requeue-001")
         scheduler.claim_task(task_id)
         scheduler.start_task(task_id, "p40-vision", "p40-vision-qwen35")
         scheduler.retry_task(task_id, delay_seconds=1)  # 1 second delay
-        
+
         # Verify state is retry_wait
         task = scheduler.get_task(task_id)
         assert task["state"] == "retry_wait"
-        
+
         # Wait for retry delay to elapse
         import time
         time.sleep(1.1)
-        
+
         # Use the new requeue_retry_wait method
         result = scheduler.requeue_retry_wait(task_id)
         assert result, "requeue_retry_wait should succeed after delay elapsed"
-        
+
         # Verify state changed to queued
         task = scheduler.get_task(task_id)
         assert task["state"] == "queued"
-        
+
         # Note: get_pending_tasks() may filter by policy window, so check DB directly
         conn = scheduler._get_connection()
         cursor = conn.cursor()
@@ -652,20 +652,20 @@ class TestRunningToAwaitingReviewFlow:
     def test_running_to_awaiting_review(self, scheduler):
         """Test that running tasks can transition to awaiting_review."""
         task_id = "task-review-001"
-        
+
         # Create and start task
         scheduler.add_task(task_id, "vision", {}, "batch", 10, "key-review-001")
         scheduler.claim_task(task_id)
         scheduler.start_task(task_id, "p40-vision", "p40-vision-qwen35")
-        
+
         # Verify state is running
         task = scheduler.get_task(task_id)
         assert task["state"] == "running"
-        
+
         # Use the new transition_running_to_awaiting_review method
         result = scheduler.transition_running_to_awaiting_review(task_id)
         assert result, "transition_running_to_awaiting_review should succeed"
-        
+
         # Verify state changed to awaiting_review
         task = scheduler.get_task(task_id)
         assert task["state"] == "awaiting_review"
@@ -673,27 +673,27 @@ class TestRunningToAwaitingReviewFlow:
     def test_awaiting_review_to_queued(self, scheduler):
         """Test that awaiting_review tasks can be requeued."""
         task_id = "task-review-002"
-        
+
         # Create task and move to awaiting_review
         scheduler.add_task(task_id, "vision", {}, "batch", 10, "key-review-002")
         scheduler.claim_task(task_id)
         scheduler.start_task(task_id, "p40-vision", "p40-vision-qwen35")
-        
+
         result = scheduler.transition_running_to_awaiting_review(task_id)
         assert result
-        
+
         # Verify state is awaiting_review
         task = scheduler.get_task(task_id)
         assert task["state"] == "awaiting_review"
-        
+
         # Use the new requeue_awaiting_review method
         result = scheduler.requeue_awaiting_review(task_id)
         assert result, "requeue_awaiting_review should succeed"
-        
+
         # Verify state changed to queued
         task = scheduler.get_task(task_id)
         assert task["state"] == "queued"
-        
+
         # Note: get_pending_tasks() may filter by policy window, so check DB directly
         conn = scheduler._get_connection()
         cursor = conn.cursor()
@@ -705,23 +705,23 @@ class TestRunningToAwaitingReviewFlow:
     def test_awaiting_review_to_failed_terminal(self, scheduler):
         """Test that awaiting_review tasks can be marked as failed_terminal."""
         task_id = "task-review-003"
-        
+
         # Create task and move to awaiting_review
         scheduler.add_task(task_id, "vision", {}, "batch", 10, "key-review-003")
         scheduler.claim_task(task_id)
         scheduler.start_task(task_id, "p40-vision", "p40-vision-qwen35")
-        
+
         result = scheduler.transition_running_to_awaiting_review(task_id)
         assert result
-        
+
         # Verify state is awaiting_review
         task = scheduler.get_task(task_id)
         assert task["state"] == "awaiting_review"
-        
+
         # Use the new transition_awaiting_review_to_failed method
         result = scheduler.transition_awaiting_review_to_failed(task_id, error='review rejected')
         assert result, "transition_awaiting_review_to_failed should succeed"
-        
+
         # Verify state changed to failed_terminal
         task = scheduler.get_task(task_id)
         assert task["state"] == "failed_terminal"

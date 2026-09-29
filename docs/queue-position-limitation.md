@@ -1,7 +1,7 @@
 # Queue Position API Limitation
 
-**File**: `gtx_broker/status_api.py::_handle_queue_position()`  
-**Date**: 2026-09-28  
+**File**: `gtx_broker/status_api.py::_handle_queue_position()`
+**Date**: 2026-09-28
 **Status**: Known limitation, not a bug
 
 ## Current Behavior

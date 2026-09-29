@@ -62,7 +62,7 @@ class SchedulerDaemon:
         if not self._api.start():
             logger.warning("Failed to start status API on port %d", port)
             return False
-        
+
         # Start background thread to run server
         self._api_thread = Thread(
             target=self._api.run_forever,
@@ -206,7 +206,7 @@ class SchedulerDaemon:
                         self._last_retention_cleanup = time.monotonic()
                     # Try to get a queued task first
                     task = self.scheduler.get_next_task()
-                    
+
                     # If no queued task, check for retry_wait tasks and promote them
                     if not task:
                         retry_task = self.scheduler.get_retry_wait_task()
@@ -225,7 +225,7 @@ class SchedulerDaemon:
                         logger.info(f"Processing task {task['id']} (kind={task['kind']})")
                         self._dispatch_task(task)
                         continue  # Skip the no-task check below
-                    
+
                 except Exception as e:
                     logger.exception(f"Error in daemon loop: {e}")
 

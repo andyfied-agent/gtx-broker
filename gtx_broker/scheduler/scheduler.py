@@ -84,36 +84,36 @@ class Scheduler:
 
     def _upgrade_columns_if_missing(self) -> None:
         """Add missing columns to existing tasks table.
-        
+
         This handles upgrade from old schema where tasks table doesn't have
         review_tag, schedule_type, or batch_epoch_id columns.
         """
         import logging
         logger = logging.getLogger(__name__)
-        
+
         conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             # Get current column names
             cursor.execute("PRAGMA table_info(tasks)")
             current_columns = {row[1] for row in cursor.fetchall()}
-            
+
             # Add missing columns
             new_columns = [
                 ("review_tag", "TEXT"),
                 ("schedule_type", "TEXT"),
                 ("batch_epoch_id", "TEXT"),
             ]
-            
+
             for col_name, col_type in new_columns:
                 if col_name not in current_columns:
                     cursor.execute(f"ALTER TABLE tasks ADD COLUMN {col_name} {col_type}")
                     logger.info(f"Added column {col_name} to tasks table")
-            
+
             conn.commit()
-            
+
         except sqlite3.Error as e:
             logger.error(f"Failed to upgrade tasks table schema: {e}")
         finally:
@@ -322,14 +322,14 @@ class Scheduler:
             if not row:
                 conn.close()
                 return None
-            
+
             from_state = row["state"]
 
             # Validate transition is legal per STATE_TRANSITIONS
             if from_state != "queued":
                 conn.close()
                 return None
-            
+
             if not self._validate_transition(task_id, from_state, "claimed"):
                 conn.close()
                 return None
@@ -348,10 +348,10 @@ class Scheduler:
             cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             conn.commit()
-            
+
             # Emit task_claimed event
             self._emit_event(task_id, "task_claimed", from_state="queued", to_state="claimed")
-            
+
             conn.close()
 
             return self._row_to_dict(row) if row else None
@@ -364,12 +364,12 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("""
                 UPDATE task_attempts SET end_at = ?
                 WHERE task_id = ? AND end_at IS NULL
             """, (datetime.now(timezone.utc).isoformat(), task_id))
-            
+
             closed = cursor.rowcount > 0
             conn.commit()
             conn.close()
@@ -379,23 +379,23 @@ class Scheduler:
 
     def _get_resource_conflicts(self, exclusive_resource: str) -> int:
         """Check if exclusive resource is already in use.
-        
+
         Args:
             exclusive_resource: Resource name (e.g., "p40")
-            
+
         Returns:
             Number of tasks currently using this resource
         """
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             # Get worker profile for the resource
             worker = self._worker_registry.get_worker_by_resource(exclusive_resource)
             if not worker:
                 conn.close()
                 return 0
-            
+
             # Count running tasks for workers sharing this resource
             # (same exclusive_resource). Exclude retry_wait and other non-running states.
             cursor.execute("""
@@ -405,13 +405,13 @@ class Scheduler:
                 WHERE t.state = 'running'
                 AND w.exclusive_resource = ?
             """, (exclusive_resource,))
-            
+
             count = cursor.fetchone()[0]
             conn.close()
             return count
         except sqlite3.OperationalError:
             return 0
-    
+
     def _emit_event_in_transaction(self, cursor, task_id: str, event_type: str, from_state: Optional[str] = None,
                                    to_state: Optional[str] = None, details: Optional[str] = None):
         """Record event within the same transaction (avoids self-lock deadlock)."""
@@ -425,36 +425,36 @@ class Scheduler:
             ))
         except sqlite3.Error:
             pass  # Event logging failures are non-fatal
-    
+
     def start_task(self, task_id: str, worker_profile: str,
                    model_profile: Optional[str] = None) -> bool:
         """Mark a task as running with atomic P40 resource locking.
-        
+
         Uses BEGIN IMMEDIATE to acquire a reserved lock, then performs all
         operations (resource check, state transition, event logging) within
         the same transaction. This prevents the race condition where two
         different tasks could both see 0 conflicts and both start on the
         same P40 resource.
-        
+
         Args:
             task_id: Task ID
             worker_profile: Worker profile that will process the task
             model_profile: Model profile to use
-            
+
         Returns:
             True if successful
         """
         import time
-        
+
         # Retry on lock contention (max 3 attempts with exponential backoff)
         for attempt in range(3):
             try:
                 conn = self._get_connection()
                 cursor = conn.cursor()
-                
+
                 # BEGIN IMMEDIATE acquires reserved lock, blocking other writers immediately
                 cursor.execute("BEGIN IMMEDIATE")
-                
+
                 try:
                     # Check task is claimed (within transaction)
                     cursor.execute("SELECT state, kind FROM tasks WHERE id = ?", (task_id,))
@@ -463,7 +463,7 @@ class Scheduler:
                         conn.rollback()
                         conn.close()
                         return False
-                    
+
                     # Check worker capability if worker_profile provided
                     if worker_profile:
                         task_kind = row["kind"]
@@ -472,7 +472,7 @@ class Scheduler:
                             conn.rollback()
                             conn.close()
                             return False
-                        
+
                         if worker.status != WorkerStatus.AVAILABLE:
                             self._emit_event_in_transaction(cursor, task_id, "worker_failed",
                                                            from_state=None, to_state=None,
@@ -480,7 +480,7 @@ class Scheduler:
                             conn.rollback()
                             conn.close()
                             return False
-                        
+
                         # ATOMIC RESOURCE CHECK: count running tasks with same exclusive_resource
                         # Using same cursor/connection as main transaction
                         if worker.exclusive_resource:
@@ -499,7 +499,7 @@ class Scheduler:
                                 conn.rollback()
                                 conn.close()
                                 return False
-                        
+
                         # Check capability matches
                         if worker.capability:
                             worker_caps = [cap.strip().lower() for cap in worker.capability.split(",")]
@@ -514,23 +514,23 @@ class Scheduler:
                                 conn.rollback()
                                 conn.close()
                                 return False
-                    
+
                     # ATOMIC TRANSITION: close old attempt, update state, record new attempt
                     cursor.execute("""
                         UPDATE task_attempts SET end_at = ?
                         WHERE task_id = ? AND end_at IS NULL
                     """, (datetime.now(timezone.utc).isoformat(), task_id))
-                    
+
                     cursor.execute("""
                         UPDATE tasks SET state = 'running', updated_at = ?
                         WHERE id = ? AND state = 'claimed'
                     """, (datetime.now(timezone.utc).isoformat(), task_id))
-                    
+
                     if cursor.rowcount == 0:
                         conn.rollback()
                         conn.close()
                         return False
-                    
+
                     cursor.execute("""
                         INSERT INTO task_attempts (task_id, worker_profile, model_profile, start_at, created_at)
                         VALUES (?, ?, ?, ?, ?)
@@ -539,21 +539,21 @@ class Scheduler:
                         datetime.now(timezone.utc).isoformat(),
                         datetime.now(timezone.utc).isoformat(),
                     ))
-                    
+
                     # Emit event within same transaction (no self-lock!)
                     self._emit_event_in_transaction(cursor, task_id, "task_started",
                                                    from_state="claimed", to_state="running",
                                                    details=f"worker={worker_profile}, model={model_profile}")
-                    
+
                     conn.commit()
                     conn.close()
                     return True
-                    
+
                 except sqlite3.Error:
                     conn.rollback()
                     conn.close()
                     return False
-                    
+
             except sqlite3.OperationalError as e:
                 conn.close()
                 # Lock contention - retry with exponential backoff
@@ -561,7 +561,7 @@ class Scheduler:
                     time.sleep(0.05 * (2 ** attempt))  # 50ms, 100ms, 200ms
                     continue
                 return False
-        
+
         return False
 
     def complete_task(self, task_id: str, result: Dict[str, Any] = None,
@@ -644,11 +644,11 @@ class Scheduler:
 
     def get_tasks_by_state(self, state: str, limit: Optional[int] = 100) -> List[Dict[str, Any]]:
         """Return durable tasks in one state for operator workflows.
-        
+
         Args:
             state: Task state to filter by
             limit: Maximum number of tasks to return. Use limit=None for unlimited results.
-        
+
         Returns:
             List of task dicts matching the state
         """
@@ -679,10 +679,10 @@ class Scheduler:
 
     def get_next_task(self) -> Optional[Dict[str, Any]]:
         """Get next task respecting policies and review priority.
-        
+
         Uses get_pending_tasks() to respect policy schedule windows,
         then returns the highest priority task (review-tagged tasks first).
-        
+
         Returns:
             Task dict with 'id', 'kind', 'payload', 'mode', 'priority' or None
         """
@@ -742,13 +742,13 @@ class Scheduler:
             # Get earliest retry_wait task that has passed its retry delay
             # Note: Use strftime to compare date/time only, ignoring microseconds
             cursor.execute("""
-                SELECT id, kind, mode, priority FROM tasks 
-                WHERE state = 'retry_wait' 
+                SELECT id, kind, mode, priority FROM tasks
+                WHERE state = 'retry_wait'
                 AND (retry_at IS NULL OR strftime('%Y-%m-%d %H:%M:%S', retry_at) <= strftime('%Y-%m-%d %H:%M:%S', 'now', 'utc'))
                 ORDER BY priority DESC, id ASC
                 LIMIT 1
             """)
-            
+
             row = cursor.fetchone()
             if not row:
                 conn.close()
@@ -794,12 +794,12 @@ class Scheduler:
 
             # Get current schedule window
             current_window = self._policy.get_current_window(pending_vision=pending_vision)
-            
+
             # Build query based on window
             # IMMEDIATE tasks always allowed
             # VISION only during IMAGE_WINDOW
             # BATCH during IMAGE_WINDOW (after images) or BATCH_WINDOW
-            
+
             if current_window == ScheduleWindow.IMAGE_WINDOW:
                 # Image window: vision + immediate
                 cursor.execute("""
@@ -934,47 +934,47 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             # Verify task is in running state (only legal source per STATE_TRANSITIONS)
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
-            
+
             from_state = row["state"]
-            
+
             # Only running can transition to retry_wait per STATE_TRANSITIONS
             if from_state != "running":
                 conn.close()
                 return False
-            
+
             # Validate transition is legal
             if not self._validate_transition(task_id, from_state, "retry_wait"):
                 conn.close()
                 return False
-            
+
             # Close the current open attempt before retry
             self._close_current_attempt(task_id)
-            
+
             # Calculate retry time
             retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
-            
+
             to_state = "retry_wait"
             cursor.execute("""
                 UPDATE tasks SET state = ?, retry_at = ?, updated_at = ?
                 WHERE id = ?
             """, (to_state, retry_at.isoformat(), datetime.now(timezone.utc).isoformat(), task_id))
-            
+
             if cursor.rowcount > 0:
-                self._emit_event(task_id, "retry_scheduled", 
+                self._emit_event(task_id, "retry_scheduled",
                                from_state=from_state, to_state=to_state,
                                details=f"delay={delay_seconds}s, retry_at={retry_at.isoformat()}")
                 conn.commit()
-                
+
             conn.close()
             return True
-            
+
         except sqlite3.OperationalError:
             return False
 
@@ -1044,32 +1044,32 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
-            
+
             if row["state"] != "claimed":
                 conn.close()
                 return False
-            
+
             to_state = "retry_wait"
             cursor.execute("""
                 UPDATE tasks SET state = ?, retry_at = ?, updated_at = ?
                 WHERE id = ?
-            """, (to_state, datetime.now(timezone.utc).isoformat(), 
+            """, (to_state, datetime.now(timezone.utc).isoformat(),
                   datetime.now(timezone.utc).isoformat(), task_id))
-            
+
             if cursor.rowcount > 0:
                 self._emit_event(task_id, "task_retry_wait",
                                from_state="claimed", to_state=to_state)
                 conn.commit()
-                
+
             conn.close()
             return True
-            
+
         except sqlite3.OperationalError:
             return False
 
@@ -1085,38 +1085,38 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT state, retry_at FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
-            
+
             if row["state"] != "retry_wait":
                 conn.close()
                 return False
-            
+
             # Check if retry delay has elapsed
             if row["retry_at"]:
                 retry_at = datetime.fromisoformat(row["retry_at"])
                 if datetime.now(timezone.utc) < retry_at:
                     conn.close()
                     return False  # Still in delay period
-            
+
             to_state = "queued"
             cursor.execute("""
                 UPDATE tasks SET state = ?, retry_at = NULL, updated_at = ?
                 WHERE id = ?
             """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
-            
+
             if cursor.rowcount > 0:
                 self._emit_event(task_id, "task_requeued",
                                from_state="retry_wait", to_state=to_state)
                 conn.commit()
-                
+
             conn.close()
             return True
-            
+
         except sqlite3.OperationalError:
             return False
 
@@ -1132,31 +1132,31 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
-            
+
             if row["state"] != "awaiting_review":
                 conn.close()
                 return False
-            
+
             to_state = "queued"
             cursor.execute("""
                 UPDATE tasks SET state = ?, updated_at = ?
                 WHERE id = ?
             """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
-            
+
             if cursor.rowcount > 0:
                 self._emit_event(task_id, "task_requeued",
                                from_state="awaiting_review", to_state=to_state)
                 conn.commit()
-                
+
             conn.close()
             return True
-            
+
         except sqlite3.OperationalError:
             return False
 
@@ -1205,32 +1205,32 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
-            
+
             if row["state"] != "awaiting_review":
                 conn.close()
                 return False
-            
+
             to_state = "failed_terminal"
             cursor.execute("""
                 UPDATE tasks SET state = ?, error = ?, updated_at = ?
                 WHERE id = ?
             """, (to_state, error, datetime.now(timezone.utc).isoformat(), task_id))
-            
+
             if cursor.rowcount > 0:
                 self._emit_event(task_id, "task_completed",
                                from_state="awaiting_review", to_state=to_state,
                                details="result=failure")
                 conn.commit()
-                
+
             conn.close()
             return True
-            
+
         except sqlite3.OperationalError:
             return False
 
@@ -1246,36 +1246,36 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
-            
+
             if row["state"] != "running":
                 conn.close()
                 return False
-            
+
             # Close current attempt before transitioning
             self._close_current_attempt(task_id)
-            
+
             to_state = "retry_wait"
             cursor.execute("""
                 UPDATE tasks SET state = ?, retry_at = ?, updated_at = ?
                 WHERE id = ?
-            """, (to_state, datetime.now(timezone.utc).isoformat(), 
+            """, (to_state, datetime.now(timezone.utc).isoformat(),
                   datetime.now(timezone.utc).isoformat(), task_id))
-            
+
             if cursor.rowcount > 0:
                 # Emit retry_wait event
                 self._emit_event(task_id, "task_retry_wait",
                                from_state="running", to_state=to_state)
                 conn.commit()
-                
+
             conn.close()
             return True
-            
+
         except sqlite3.OperationalError:
             return False
 
@@ -1291,34 +1291,34 @@ class Scheduler:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            
+
             cursor.execute("SELECT state FROM tasks WHERE id = ?", (task_id,))
             row = cursor.fetchone()
             if not row:
                 conn.close()
                 return False
-            
+
             if row["state"] != "running":
                 conn.close()
                 return False
-            
+
             # Close current attempt before transitioning
             self._close_current_attempt(task_id)
-            
+
             to_state = "awaiting_review"
             cursor.execute("""
                 UPDATE tasks SET state = ?, updated_at = ?
                 WHERE id = ?
             """, (to_state, datetime.now(timezone.utc).isoformat(), task_id))
-            
+
             if cursor.rowcount > 0:
                 # Emit awaiting_review event (not task_started which is misleading)
                 self._emit_event(task_id, "task_awaiting_review",
                                from_state="running", to_state=to_state)
                 conn.commit()
-                
+
             conn.close()
             return True
-            
+
         except sqlite3.OperationalError:
             return False

@@ -25,11 +25,11 @@ class TestStatusAPIIntegration(unittest.TestCase):
         self.temp_dir = Path(tempfile.mkdtemp(prefix="gtx-test-"))
         self.temp_incoming = self.temp_dir / "incoming"
         self.temp_incoming.mkdir()
-        
+
         self.temp_db = self.temp_dir / f"test_{time.time()}.db"
         self.config = SchedulerConfig(db_path=str(self.temp_db))
         self.scheduler = Scheduler(self.config)
-        
+
         # Create test tasks
         self.task_id = str(uuid.uuid4())
         self.scheduler.add_task(
@@ -38,21 +38,21 @@ class TestStatusAPIIntegration(unittest.TestCase):
             payload={"source": "test"},
             priority=10,
         )
-        
+
         # Start API server
         self.api = StatusAPI(self.scheduler, port=0)
         self.assertTrue(self.api.start())
-        
+
         # Get the actual port and start thread
         self.port = self.api.server.server_address[1]
         self.base_url = f"http://127.0.0.1:{self.port}"
-        
+
         self.api_thread = Thread(target=self.api.run_forever, daemon=True)
         self.api_thread.start()
-        
+
         # Give server time to start
         time.sleep(0.3)
-    
+
     def tearDown(self):
         """Clean up test fixtures."""
         if self.api:
@@ -126,7 +126,7 @@ class TestStatusAPIIntegration(unittest.TestCase):
         """Test GET /queue?task_id=... for non-queued task returns None position."""
         # Transition task to claimed state
         self.scheduler.claim_task(self.task_id)
-        
+
         req = urllib.request.Request(f"{self.base_url}/queue?task_id={self.task_id}")
         with urllib.request.urlopen(req, timeout=5) as response:
             self.assertEqual(response.status, 200)
@@ -145,14 +145,14 @@ class TestStatusAPIIntegration(unittest.TestCase):
             payload={"source": "test2"},
             priority=20,  # Higher priority
         )
-        
+
         # task_id should be position 2 (lower priority)
         req = urllib.request.Request(f"{self.base_url}/queue?task_id={self.task_id}")
         with urllib.request.urlopen(req, timeout=5) as response:
             self.assertEqual(response.status, 200)
             data = json.loads(response.read().decode("utf-8"))
             self.assertEqual(data["queue_position"], 2)
-            
+
         # task2_id should be position 1 (higher priority)
         req = urllib.request.Request(f"{self.base_url}/queue?task_id={task2_id}")
         with urllib.request.urlopen(req, timeout=5) as response:
@@ -164,20 +164,20 @@ class TestStatusAPIIntegration(unittest.TestCase):
         """Test that daemon properly shuts down API server."""
         # Start a daemon with API
         from gtx_broker.daemon import SchedulerDaemon
-        
+
         daemon = SchedulerDaemon(self.config)
-        
+
         # Start the API on a different port to avoid collision
         api_port = self.port + 1
         self.assertTrue(daemon._start_status_api(api_port))
-        
+
         # Verify server is running
         self.assertIsNotNone(daemon._api)
         self.assertIsNotNone(daemon._api.server)
-        
+
         # Call shutdown directly (simulating finally block behavior)
         daemon._api.shutdown()
-        
+
         # Verify server is stopped
         self.assertIsNone(daemon._api.server)
 

@@ -95,7 +95,7 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
     def _handle_queue_stats(self):
         """Get queue statistics."""
         depths = self.scheduler.get_queue_depths()
-        
+
         response = {
             "queued": depths.get("queued", 0),
             "claimed": depths.get("claimed", 0),
@@ -108,7 +108,7 @@ class StatusAPIHandler(BaseHTTPRequestHandler):
 
     def _handle_queue_position(self, task_id: str):
         """Get queue position for a specific task.
-        
+
         Only returns position for tasks in 'queued' state.
         Returns None for tasks not in queue.
         """
