@@ -441,14 +441,14 @@ class DefaultCodingDispatcher:
                     raise ValueError("Codex final verification requires Codex reviewer")
             elif attempt_role != "repair" or is_final_verification:
                 raise ValueError("Codex coding attempts must be explicit repair attempts")
-            elif reviewer not in (None, ""):
-                raise ValueError("Codex repair requires a separate fresh verification")
+            elif reviewer not in (None, "", "codex", "air-review"):
+                raise ValueError("Codex repair reviewer must be Codex or Air Review")
         elif attempt_role == "final_verification" or is_final_verification:
             raise ValueError("Only Codex may perform final verification")
-        elif classification == "success" and reviewer != ROUTINE_REVIEWER:
-            raise ValueError("successful candidate attempts require Codex review")
-        elif is_substantive and reviewer != ROUTINE_REVIEWER:
-            raise ValueError("substantive candidate attempts require Codex review")
+        elif classification == "success" and reviewer not in {ROUTINE_REVIEWER, "air-review"}:
+            raise ValueError("successful candidate attempts require Codex review or Air Review")
+        elif is_substantive and reviewer not in {ROUTINE_REVIEWER, "air-review"}:
+            raise ValueError("substantive candidate attempts require Codex review or Air Review")
         if model_id != "codex" and final_decision == "accepted":
             final_decision = "needs_codex_verification"
         if model_id == "codex" and attempt_role == "repair" and final_decision == "accepted":

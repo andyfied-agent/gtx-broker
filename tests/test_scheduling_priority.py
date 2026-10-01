@@ -13,6 +13,7 @@ from gtx_broker.scheduler import (  # noqa: E402
     SchedulerConfig,
 )
 from gtx_broker.scheduler.handlers import CodingHandler, HandlerResult
+from gtx_broker.scheduler.workers import WorkerStatus
 
 
 def make_scheduler(tmp_path):
@@ -79,8 +80,33 @@ def test_review_tag_does_not_fall_back_to_p40(tmp_path):
     )
     task = scheduler.get_task("review")
     assert task["review_tag"] is True
-    assert task["review_worker"] == "air-review"
+    assert task["review_worker"] == "codex-review"
     assert scheduler.select_worker_for_task(task) is None
+
+
+def test_review_prefers_codex_when_available(tmp_path):
+    scheduler = make_scheduler(tmp_path)
+    scheduler._worker_registry.update_status("codex-review", WorkerStatus.AVAILABLE)
+    scheduler.add_task(
+        "review-codex", "coding", {}, "batch", priority=10,
+        idempotency_key="review-codex", review_tag=True,
+    )
+
+    task = scheduler.get_task("review-codex")
+    assert scheduler.select_worker_for_task(task) == "codex-review"
+
+
+def test_review_fails_over_to_air_when_codex_unavailable(tmp_path):
+    scheduler = make_scheduler(tmp_path)
+    scheduler._worker_registry.update_status("codex-review", WorkerStatus.UNAVAILABLE)
+    scheduler._worker_registry.update_status("air-review", WorkerStatus.AVAILABLE)
+    scheduler.add_task(
+        "review-air", "coding", {}, "batch", priority=10,
+        idempotency_key="review-air", review_tag=True,
+    )
+
+    task = scheduler.get_task("review-air")
+    assert scheduler.select_worker_for_task(task) == "air-review"
 
 
 def test_epoch_barrier_and_review_evidence_are_durable(tmp_path):

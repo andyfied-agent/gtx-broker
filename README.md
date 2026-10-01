@@ -44,6 +44,12 @@ addition to the Python standard library.
 Workstation and Telegram integration remain separate deployment concerns and
 are verified on compute01 before their local compatibility imports are removed.
 
+Repository README tools use the compute01 defaults unless
+`GTX_BROKER_REPOSITORY_REGISTRY` points to a JSON registry file. The registry
+may contain either `{ "repositories": { "name": "path-or-github-url" } }` or
+the repository mapping directly. Discovery reports both successful and failed
+configured repositories.
+
 The scheduler daemon also exposes a localhost-only operator API for task status,
 queue information, and cancellation. See docs/status-api.md for the endpoints
 and deployment configuration.

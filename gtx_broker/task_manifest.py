@@ -18,7 +18,7 @@ TASK_MANIFEST_VERSION = 1
 MAX_CONTEXT_SIZE = 262_144
 MAX_TIMEOUT_SECONDS = 7_200
 ALLOWED_WORKERS = {"p40-coding", "slow-coder"}
-MERGE_POLICY = "air-review-then-codex"
+MERGE_POLICY = "codex-review-then-air-failover"
 BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 
 REQUIRED_FIELDS = {
@@ -158,13 +158,13 @@ def validate_task_manifest(
     if not isinstance(policy, Mapping):
         raise TaskManifestError("review_policy must be an object")
     required_policy = {
-        "air_review_required": True,
-        "codex_final_review_required": True,
+        "codex_review_required": True,
+        "air_review_failover": True,
         "merge_on_approval": True,
     }
     if dict(policy) != required_policy:
         raise TaskManifestError(
-            "review_policy must require Air Review, Codex final review, and approval merge"
+            "review_policy must require Codex review, Air Review failover, and approval merge"
         )
     values["review_policy"] = dict(policy)
 

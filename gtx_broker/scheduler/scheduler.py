@@ -36,6 +36,9 @@ CONTROL_VALUES = {
     "mode": {"day", "night"},
 }
 
+PRIMARY_REVIEW_WORKER = "codex-review"
+FAILOVER_REVIEW_WORKER = "air-review"
+
 
 @dataclass
 class SchedulerConfig:
@@ -476,7 +479,7 @@ class Scheduler:
         if schedule_type not in valid_schedules:
             raise ValueError(f"unsupported schedule type: {schedule_type}")
         if review_tag and review_worker is None:
-            review_worker = "air-review"
+            review_worker = PRIMARY_REVIEW_WORKER
 
         try:
             conn = self._get_connection()
@@ -1027,12 +1030,20 @@ class Scheduler:
 
         Vision is deliberately an explicit P40 capability. Immediate coding
         also stays on the P40; non-urgent batch/nightly coding is assigned to
-        the isolated CPU/RAM slow coder. Review tasks use the configured review
-        worker and do not silently fall back to the P40 or GTX when that worker
-        is unavailable.
+        the isolated CPU/RAM slow coder. Review tasks prefer Codex and fail
+        over only to Air Review when Codex is unavailable; they never fall
+        back to the P40 or GTX.
         """
         if task.get("review_tag") or task.get("review_worker"):
-            profile = task.get("review_worker") or "air-review"
+            preferred = task.get("review_worker") or PRIMARY_REVIEW_WORKER
+            profiles = [preferred]
+            if preferred == PRIMARY_REVIEW_WORKER:
+                profiles.append(FAILOVER_REVIEW_WORKER)
+            for profile in profiles:
+                worker = self._worker_registry.get_worker(profile)
+                if worker is not None and worker.status == WorkerStatus.AVAILABLE:
+                    return worker.profile
+            return None
         else:
             payload = task.get("payload") or {}
             requested_profile = task.get("worker_profile") or payload.get("worker_profile")
@@ -1631,11 +1642,16 @@ class Scheduler:
         except sqlite3.OperationalError:
             return False
 
-    def transition_running_to_retry_wait(self, task_id: str) -> bool:
+    def transition_running_to_retry_wait(
+        self, task_id: str, result: Optional[Dict[str, Any]] = None,
+        failure_class: Optional[str] = None,
+    ) -> bool:
         """Transition running → retry_wait, closing current attempt.
 
         Args:
             task_id: Task ID
+            result: Structured handler result to persist on the closed attempt
+            failure_class: Optional retry classification for the closed attempt
 
         Returns:
             True if transitioned
@@ -1654,8 +1670,16 @@ class Scheduler:
                 conn.close()
                 return False
 
-            # Close current attempt before transitioning
-            self._close_current_attempt(task_id)
+            # Close and annotate the current attempt in the same transaction
+            # as the state transition so retry evidence cannot be lost.
+            cursor.execute("""
+                UPDATE task_attempts SET end_at = ?, result = ?, failure_class = ?
+                WHERE task_id = ? AND end_at IS NULL
+            """, (
+                datetime.now(timezone.utc).isoformat(),
+                self._json_dump(result) if result is not None else None,
+                failure_class, task_id,
+            ))
 
             to_state = "retry_wait"
             cursor.execute("""

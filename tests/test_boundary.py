@@ -45,11 +45,11 @@ def make_manifest(tmp_path):
         "commit_required": True,
         "pull_request_required": True,
         "review_policy": {
-            "air_review_required": True,
-            "codex_final_review_required": True,
+            "codex_review_required": True,
+            "air_review_failover": True,
             "merge_on_approval": True,
         },
-        "merge_policy": "air-review-then-codex",
+        "merge_policy": "codex-review-then-air-failover",
     }
 
 

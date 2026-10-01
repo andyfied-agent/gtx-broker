@@ -26,6 +26,17 @@ def _image(path: Path, size=(640, 480)) -> Path:
     return path
 
 
+def _review_worktree(path: Path) -> Path:
+    path.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
+    (path / ".baseline").write_text("baseline\n")
+    subprocess.run(["git", "add", ".baseline"], cwd=path, check=True)
+    subprocess.run(["git", "commit", "-qm", "baseline"], cwd=path, check=True)
+    return path
+
+
 def test_quality_gate_records_dimensions_and_flags_duplicate(tmp_path):
     image = _image(tmp_path / "one.jpg")
     gate = ImageQualityGate()
@@ -196,8 +207,7 @@ def test_coding_handler_selects_slow_coder_timeout(monkeypatch, tmp_path):
 
 def test_review_handler_is_read_only_and_validates_findings(tmp_path):
     worktree = tmp_path / "repo"
-    worktree.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    _review_worktree(worktree)
     output = {"passed": False, "findings": [{"id": "F-1", "severity": "high"}]}
     command = [sys.executable, "-c", f"print({json.dumps(json.dumps(output))})"]
 
@@ -206,4 +216,102 @@ def test_review_handler_is_read_only_and_validates_findings(tmp_path):
         "payload": {"worktree_path": str(worktree), "review_command": command},
     })
 
+    assert result is HandlerResult.FAILED
+    assert ReviewHandler().validate_output(output)[0] is True
+
+
+def test_review_handler_preserves_rejection_findings(tmp_path):
+    worktree = _review_worktree(tmp_path / "repo")
+    output = {"passed": False, "findings": ["unsafe change"], "evidence": ["F-1"]}
+    command = [sys.executable, "-c", f"print({json.dumps(json.dumps(output))})"]
+    handler = ReviewHandler()
+
+    result = handler.execute({
+        "kind": "review",
+        "payload": {"worktree_path": str(worktree), "review_command": command},
+    })
+
+    assert result is HandlerResult.FAILED
+    assert handler.last_result["status"] == "rejected"
+    assert handler.last_result["findings"] == ["unsafe change"]
+    assert handler.last_result["review_attempts"][0]["failure_kind"] == "rejected_code"
+
+
+def test_review_handler_rejects_committed_reviewer_mutation(tmp_path):
+    worktree = _review_worktree(tmp_path / "repo")
+    mutation_script = (
+        "from pathlib import Path; import subprocess; "
+        "Path('reviewer.txt').write_text('mutation\\n'); "
+        "subprocess.run(['git','add','reviewer.txt'], check=True); "
+        "subprocess.run(['git','commit','-qm','reviewer mutation'], check=True); "
+        "print('{\\\"passed\\\":true,\\\"findings\\\":[],\\\"evidence\\\":[]}')"
+    )
+    handler = ReviewHandler()
+    result = handler.execute({
+        "kind": "review",
+        "payload": {
+            "worktree_path": str(worktree),
+            "review_command": [sys.executable, "-c", mutation_script],
+        },
+    })
+
+    assert result is HandlerResult.FAILED
+    assert handler.last_result["failure_kind"] == "review_mutated"
+    assert handler.last_result["status"] == "rejected"
+
+
+def test_review_handler_uses_air_only_when_codex_is_unavailable(tmp_path):
+    worktree = tmp_path / "repo"
+    _review_worktree(worktree)
+    output = {"passed": True, "findings": []}
+    codex_command = [sys.executable, "-c", "import sys; sys.exit(2)"]
+    air_command = [sys.executable, "-c", f"print({json.dumps(json.dumps(output))})"]
+
+    handler = ReviewHandler()
+    result = handler.execute({
+        "kind": "review",
+        "worker_profile": "codex-review",
+        "payload": {
+            "worktree_path": str(worktree),
+            "codex_review_command": codex_command,
+            "air_review_command": air_command,
+        },
+    })
+
     assert result is HandlerResult.SUCCESS
+    assert handler.last_result["reviewer"] == "air-review"
+    assert handler.last_result["fallback_used"] is True
+    assert handler.last_result["review_attempts"][0]["exit_code"] == 2
+
+
+def test_review_handler_expands_bare_codex_command(tmp_path):
+    worktree = tmp_path / "repo"
+    _review_worktree(worktree)
+    completed = subprocess.CompletedProcess(
+        [], 0, stdout=json.dumps({"passed": True, "findings": []}), stderr="",
+    )
+
+    with patch.object(ReviewHandler, "_git_snapshot", return_value=("head", "fingerprint")):
+        with patch("gtx_broker.scheduler.handlers.subprocess.run", return_value=completed) as run:
+            result = ReviewHandler().execute({
+                "kind": "review",
+                "worker_profile": "codex-review",
+                "payload": {
+                    "worktree_path": str(worktree),
+                    "codex_review_command": "/home/andyfied/.local/bin/codex",
+                },
+            })
+
+    assert result is HandlerResult.SUCCESS
+    codex_call = next(
+        call for call in run.call_args_list
+        if call.args and call.args[0][0] == "/home/andyfied/.local/bin/codex"
+    )
+    argv = codex_call.args[0]
+    assert argv[:2] == ["/home/andyfied/.local/bin/codex", "exec"]
+    assert ["--cd", str(worktree)] == argv[argv.index("--cd"):argv.index("--cd") + 2]
+    assert "--ephemeral" in argv
+    assert "--output-schema" in argv
+    assert json.loads(codex_call.kwargs["input"])["instruction"].startswith(
+        "Inspect the current worktree"
+    )

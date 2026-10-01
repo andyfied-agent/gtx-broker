@@ -7,13 +7,13 @@ name = "gtx-broker"
 version = "0.1.0"
 description = "Deterministic task scoping, routing, and escalation controller"
 requires-python = ">=3.10"
-dependencies = ["Pillow", "python-magic"]
+dependencies = ["Pillow", "python-magic", "requests"]
 
 [project.scripts]
 gtx-image-ingress = "gtx_broker.telegram_ingress:main"
 
 [tool.setuptools]
-packages = ["gtx_broker", "gtx_broker.scheduler", "second_shift"]
+packages = ["gtx_broker", "gtx_broker.scheduler", "gtx_broker.tools", "second_shift"]
 
 [tool.setuptools.package-data]
 "gtx_broker.scheduler" = ["migrations/*.sql"]
