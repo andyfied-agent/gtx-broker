@@ -57,6 +57,7 @@ def test_quality_gate_rejects_corrupt_image(tmp_path):
 
 
 def test_telegram_ingress_stages_and_enqueues_idempotently(tmp_path):
+    """Keep the explicit internal Python compatibility API operational."""
     source = _image(tmp_path / "source.jpg")
     storage = StorageContract(tmp_path / "storage")
     scheduler = Scheduler(SchedulerConfig(db_path=str(tmp_path / "storage" / "metadata" / "tasks.db")))

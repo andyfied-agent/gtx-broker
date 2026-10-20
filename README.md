@@ -39,10 +39,13 @@ response = director.route_request(RoutingRequest(
 python3 -m pytest -q
 ```
 
-The package uses Pillow and python-magic for validated image ingress in
-addition to the Python standard library.
-Workstation and Telegram integration remain separate deployment concerns and
-are verified on compute01 before their local compatibility imports are removed.
+The former `gtx-image-ingress --json-stdin` implementation is retained only as a
+fail-closed compatibility command. The active Hermes image hook is the separate
+stage-only `paperclip-image-ingress --json-stdin` boundary, which validates and
+atomically saves Telegram images under `/mnt/scratch/gtx-images/incoming/`.
+It does not create scheduler tasks or call P40. Workstation and Telegram
+integration remain separate deployment concerns and are verified on compute01
+before their local compatibility imports are removed.
 
 Repository README tools use the compute01 defaults unless
 `GTX_BROKER_REPOSITORY_REGISTRY` points to a JSON registry file. The registry
