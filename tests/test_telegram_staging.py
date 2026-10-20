@@ -67,3 +67,39 @@ def test_stage_event_rejects_missing_source_without_creating_task(tmp_path):
     assert result.status == "rejected"
     assert result.path is None
     assert not (tmp_path / "gtx-images" / "incoming").exists()
+
+
+def test_stage_event_rolls_back_when_metadata_publication_fails(tmp_path, monkeypatch):
+    source = tmp_path / "cached.jpg"
+    _image(source)
+
+    monkeypatch.setattr(
+        "gtx_broker.telegram_staging.StorageContract.update_metadata",
+        lambda self, task_id, updates: False,
+    )
+    result = stage_event(
+        {"source_path": str(source), "chat_id": 1, "message_id": 3},
+        tmp_path / "gtx-images",
+    )
+
+    assert result.accepted is False
+    assert not list((tmp_path / "gtx-images" / "incoming").iterdir())
+
+
+def test_stage_event_repairs_an_accepted_replay_record(tmp_path):
+    source = tmp_path / "cached.jpg"
+    _image(source)
+    event = {"source_path": str(source), "chat_id": 1, "message_id": 4}
+    storage_root = tmp_path / "gtx-images"
+
+    first = stage_event(event, storage_root)
+    from gtx_broker.scheduler.storage import StorageContract
+
+    storage = StorageContract(storage_root)
+    assert storage.update_metadata(first.task_id, {"status": "accepted"}) is True
+
+    replay = stage_event(event, storage_root)
+
+    assert replay.accepted is True
+    assert replay.idempotent_replay is True
+    assert storage.get_task(first.task_id)["status"] == "saved"

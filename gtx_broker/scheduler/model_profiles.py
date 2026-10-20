@@ -74,6 +74,7 @@ class P40ModelProfileController:
     
     def _load_profiles_from_conf(self) -> None:
         """Load profile metadata from .conf files (canonical source)."""
+        self._profiles.clear()
         if not self.PROFILES_DIR.exists():
             logger.warning(f"Profiles directory not found: {self.PROFILES_DIR}")
             return

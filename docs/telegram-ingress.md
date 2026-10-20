@@ -33,12 +33,11 @@ queued an idempotent nightly vision task. The active staging command retains the
 validated atomic copy and source metadata but deliberately does not create a
 scheduler task or run quality-gate/model work.
 
-The active command does not read `GTX_SCHEDULER_DB`. Historical library callers
-constructed `TelegramImageIngress` with their own `Scheduler` and
-`StorageContract`; the former CLI default database was
-`/mnt/scratch/gtx-images/metadata/tasks.db`, with the storage root as the
-parent of its `metadata` directory.
-
+The Python `TelegramImageIngress.ingest()` API remains an explicitly constructed
+internal compatibility surface for scheduler callers and is covered by the
+scheduler-handler tests. It is not used by the active Hermes hook. The public
+`gtx-image-ingress` CLI remains fail-closed so retired task scheduling cannot be
+reactivated accidentally.
 Older Hermes configurations referred to this as the
 `platforms.telegram.extra.broker_image_ingress_command` hook. The configured
 command now points to the stage-only `paperclip-image-ingress` entry point.

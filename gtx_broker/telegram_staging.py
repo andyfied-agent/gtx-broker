@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import sys
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -45,11 +46,33 @@ def _storage_lock(storage_root: Path) -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _remove_incomplete_publication(storage: StorageContract, task_id: str) -> None:
+    """Remove only an incomplete task published by this stage-only boundary."""
+    task_dir = storage.incoming_path / task_id
+    if task_dir.is_dir() and not task_dir.is_symlink():
+        shutil.rmtree(task_dir)
+
+
 def _existing_result(storage: StorageContract, task_id: str) -> StagingResult | None:
     metadata = storage.get_task(task_id)
     path = storage.input_path(task_id)
     if metadata is None or path is None or not path.is_file():
         return None
+
+    status = metadata.get("status")
+    if status == "accepted":
+        repaired = storage.update_metadata(
+            task_id,
+            {"status": "saved", "ingress_mode": "telegram-stage-only"},
+        )
+        metadata = storage.get_task(task_id)
+        if not repaired or metadata is None or metadata.get("status") != "saved":
+            _remove_incomplete_publication(storage, task_id)
+            return _reject("existing staging record is incomplete")
+        status = metadata.get("status")
+    if status != "saved":
+        return _reject(f"existing staging record has unexpected status: {status!r}")
+
     return StagingResult(
         True,
         "saved",
@@ -113,9 +136,11 @@ def stage_event(event: Mapping[str, Any], storage_root: Path) -> StagingResult:
                     "ingress_mode": "telegram-stage-only",
                 },
             ):
+                _remove_incomplete_publication(storage, task_id)
                 return _reject("could not persist staging metadata")
             path = storage.input_path(task_id)
             if path is None or not path.is_file():
+                _remove_incomplete_publication(storage, task_id)
                 return _reject("staged image path is missing")
             return StagingResult(True, "saved", task_id=task_id, path=str(path))
     except (OSError, ValueError, TypeError) as exc:
