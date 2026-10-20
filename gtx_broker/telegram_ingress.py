@@ -1,7 +1,6 @@
-"""Safe command-line handoff from Hermes Telegram media to the scheduler."""
+"""Retired Telegram task ingress kept as a fail-closed compatibility command."""
 
 import json
-import os
 import sys
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -24,7 +23,16 @@ class IngressResult:
 
 
 class TelegramImageIngress:
-    """Validate, persist, and enqueue one authorized Telegram image event."""
+    """Validate, persist, and enqueue one authorized Telegram image event.
+
+    This library API is retained for historical compatibility.  The public CLI
+    entry point is fail-closed because active Telegram staging uses the separate
+    stage-only ingress boundary.
+    """
+
+    DISABLED_REASON = (
+        "GTX Broker task ingress is retired; use the durable Telegram image staging command"
+    )
 
     def __init__(self, scheduler: Scheduler, storage: StorageContract,
                  quality_gate: ImageQualityGate | None = None):
@@ -156,15 +164,13 @@ def main(argv: list[str] | None = None) -> int:
         event = json.load(sys.stdin)
         if not isinstance(event, dict):
             raise TypeError("event must be a JSON object")
-        db_path = os.environ.get(
-            "GTX_SCHEDULER_DB", "/mnt/scratch/gtx-images/metadata/tasks.db"
+        result = IngressResult(
+            accepted=False,
+            status="rejected",
+            error=TelegramImageIngress.DISABLED_REASON,
         )
-        config = SchedulerConfig(db_path=db_path)
-        scheduler = Scheduler(config)
-        storage = StorageContract(Path(db_path).parent.parent)
-        result = TelegramImageIngress(scheduler, storage).ingest(event)
         print(json.dumps(asdict(result), sort_keys=True))
-        return 0 if result.accepted else 2
+        return 2
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         print(json.dumps({"accepted": False, "status": "rejected", "error": str(exc)}))
         return 2

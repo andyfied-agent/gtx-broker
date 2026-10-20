@@ -26,9 +26,12 @@ The follow-on integration stage is included in the same branch:
   reaches a terminal state;
 - an opt-in P40 model-profile boundary restores the configured default profile
   in `finally`; it never targets the GTX worker;
-- `gtx-image-ingress --json-stdin` validates and atomically stages a Telegram
-  image, records source metadata, applies the quality gate, and creates an
-  idempotent nightly vision task;
+- the former `gtx-image-ingress --json-stdin` implementation validated and
+  atomically staged a Telegram image, recorded source metadata, applied the
+  quality gate, and created an idempotent nightly vision task; the current
+  compatibility command rejects events fail-closed; active Telegram image
+  handling uses the separate stage-only Hermes hook and does not create a
+  scheduler task or call P40;
 - `CodingHandler` provides an explicit P40 executor/worktree/test boundary and
   rejects successful-but-dirty worktrees when a commit is required;
 - `ReviewHandler` provides an explicit read-only Air-review command boundary,

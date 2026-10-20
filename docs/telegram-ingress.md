@@ -1,10 +1,23 @@
 # Telegram image ingress
 
-`gtx-image-ingress --json-stdin` is the broker-owned handoff for the optional
-Hermes Telegram media hook. It reads one JSON event from standard input and
-writes one JSON result to standard output.
+`gtx-image-ingress --json-stdin` is retained only as a fail-closed compatibility
+entry point. It rejects every image and does not stage files, create scheduler
+tasks, call P40, or mutate the GTX Broker database.
 
-The event must include `source_path`. It may include `chat_id`, `message_id`,
+The active Hermes hook is the separate `paperclip-image-ingress --json-stdin`
+command. It validates and atomically stages the image under
+`/mnt/scratch/gtx-images/incoming/<task-id>/image.*`, records source metadata,
+and returns the durable path. It is stage-only: it does not create a scheduler
+task or claim that a worker processed the image.
+
+The active staging command reads one JSON event from standard input and writes
+one JSON result to standard output. A successful result has `status="saved"` and
+an absolute `path`; a replay of the same Telegram chat/message/content returns
+the existing durable path with `idempotent_replay=true`. The retired CLI's
+rejection is intentional so a stale `gtx-image-ingress` launcher cannot silently
+reactivate the old scheduler/P40 image path.
+
+Historical event fields included `source_path`, `chat_id`, `message_id`,
 `user_id`, `kind`, `caption`, `media_group_id`, `schema`, and `prompt`.
 `schema` is `receipt` by default. Use `image_description` for non-receipt
 images; the broker stores that selection in the task payload and validates the
@@ -14,23 +27,21 @@ for workflows that have separately been approved for unattended processing. A
 caller-provided `prompt` is permitted for an approved schema but does not bypass
 output validation.
 
-The command validates the file with the storage contract, verifies image
-content, copies it atomically below the configured storage root, records quality
-metrics, and queues an idempotent nightly vision task. Replaying the same
-chat/message/file event returns the existing task. Unknown schemas are rejected
-before anything is staged.
+The former implementation validated the file with the storage contract, copied
+it atomically below the configured storage root, recorded quality metrics, and
+queued an idempotent nightly vision task. The active staging command retains the
+validated atomic copy and source metadata but deliberately does not create a
+scheduler task or run quality-gate/model work.
 
-Set `GTX_SCHEDULER_DB` to the scheduler database path when using a non-default
-storage root. The storage root is the parent of the database's `metadata`
-directory; the default database is
-`/mnt/scratch/gtx-images/metadata/tasks.db`.
+The active command does not read `GTX_SCHEDULER_DB`. Historical library callers
+constructed `TelegramImageIngress` with their own `Scheduler` and
+`StorageContract`; the former CLI default database was
+`/mnt/scratch/gtx-images/metadata/tasks.db`, with the storage root as the
+parent of its `metadata` directory.
 
-Hermes should invoke the command only after its normal authorization and media
-download checks. Configure its optional
-`platforms.telegram.extra.broker_image_ingress_command` hook with the command
-and preserve the JSON result for the user-facing acknowledgement. If the
-command is unavailable or returns a rejection, Hermes should retain its normal
-temporary-cache behavior and report that processing could not be queued.
+Older Hermes configurations referred to this as the
+`platforms.telegram.extra.broker_image_ingress_command` hook. The configured
+command now points to the stage-only `paperclip-image-ingress` entry point.
 
 The broker's VisionReviewService is the storage/scheduler boundary for the
 authorized review UI: it lists `awaiting_review` tasks and records an approval
